@@ -1,92 +1,158 @@
 # focusnotes
 
-This folder contains a Swift Package foundation for a native macOS app. The app captures selected text and screen regions without activating itself. Shared app logic lives in the headless `Core` library.
+**Take notes without breaking focus.**
 
-Change the app name by editing `Config/app.env` only.
+focusnotes is a small macOS menu-bar app for capturing what you're reading or thinking without leaving the app you're
+working in. Select text and press a shortcut. Drag over part of the screen. Jot a quick note in a floating panel. Your
+window keeps focus the whole time, and everything lands in plain Markdown files you own.
 
-The app links macOS's system SQLite and checks for FTS5 when the search index
-opens. macOS 14 ships SQLite 3.43 or newer. The index uses no triggers, which
-avoids the FTS5-in-trigger issue in SQLite versions before 3.44.
+> **Status:** early and in active testing. There is no `.dmg` yet; build it from source using the steps below.
+
+## Why
+
+Taking a note usually means a context switch: open the notes app, find the right page, paste, tidy up, switch back.
+Each switch costs a little attention, and you lose more of it the more often you do it.
+
+focusnotes never pulls you out of what you're doing:
+
+- **No app switching.** Captures happen in place. focusnotes never activates itself or steals focus from your window.
+- **Keyboard first.** Every action has a global shortcut, and a toast confirms it was saved.
+- **Sessions.** Start a session for a topic, such as a course, a paper or a design review, and every capture and
+  note goes to that topic's note until you end it.
+- **Plain Markdown.** Notes are ordinary `.md` files, compatible with Obsidian or any editor. There's no database
+  you can't read and no lock-in.
+- **Local only.** Nothing leaves your Mac. Search, OCR and the optional semantic search all run on-device.
+
+## Features
+
+- **Capture selection.** Saves the selected text from any app, along with where it came from.
+- **Capture area.** Drag over part of the screen to save it as an image. Text in the image is recognised (OCR) and
+  becomes searchable.
+- **Quick note.** A floating panel for typing Markdown with a live preview. It stays on screen while you work in
+  other windows, and saves with ⌘↩.
+- **Search.** Keyword search across all your notes, plus optional on-device semantic search.
+- **Sessions and subheadings.** Group captures by topic, and add a subheading to start a new section.
+
+## Shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌥⇧C</kbd> | Capture selected text |
+| <kbd>⌥⇧S</kbd> | Capture an area of the screen |
+| <kbd>⌥⇧N</kbd> | Write a quick note |
+| <kbd>⌥⇧F</kbd> | Search notes |
+| <kbd>⌥⇧A</kbd> | Start or end a session |
+| <kbd>⌥⇧H</kbd> | Add a subheading |
+| <kbd>⌥⇧L</kbd> | Open the notes folder |
+
+Inside the quick note: <kbd>⌘↩</kbd> saves, <kbd>⌘K</kbd> opens actions, <kbd>⌘P</kbd> browses notes, <kbd>esc</kbd>
+closes it and keeps your draft.
+
+## Getting started
+
+### Requirements
+
+- macOS 14 Sonoma or later
+- A Swift 6.4 toolchain: a current Xcode, or the Command Line Tools
+- Apple silicon, only if you want semantic search
+
+### Build and run
 
 ```bash
-swift build
-swift run CoreChecks
-scripts/build-app.sh [debug|release]
-scripts/run-app.sh [debug|release]
-scripts/check-name.sh
+git clone git@github.com:zerodoxxx/focusnotes.git
+cd focusnotes
+./scripts/run-app.sh
 ```
 
-Default shortcuts: **⌥⇧C** captures selected text, **⌥⇧S** captures an area,
-**⌥⇧F** searches, **⌥⇧A** starts or ends a session, **⌥⇧N** writes a note, **⌥⇧H** adds a subheading,
-and **⌥⇧L** opens the notes folder. A second press of the capture shortcut while
-its toast is visible chooses the destination note.
+`run-app.sh` builds `build/focusnotes.app`, quits any running copy and opens the new one. A tray icon appears in the
+menu bar; there is no Dock icon. Use `./scripts/run-app.sh release` for an optimised build. To build without
+launching, run `./scripts/build-app.sh`.
 
-Notes are append-only, plain Markdown compatible with Obsidian: `#` names the
-note, `##` is a user subheading, and `###` identifies a source. A source heading
-appears on the first capture, when the source changes, or after an intervening
-Markdown heading outside fenced code. Timestamps and apps live in invisible
-markers, so repeated captures stay uncluttered:
+### Grant permissions
+
+On first use, macOS asks for two permissions. Grant them in **System Settings → Privacy & Security**:
+
+| Permission | Needed for |
+| --- | --- |
+| Accessibility | Reading the selected text in other apps |
+| Screen Recording | Capturing an area of the screen |
+
+The menu-bar menu shows the status of each under **Permissions**.
+
+> **Tip:** by default the app is signed ad hoc, so macOS may ask for permissions again after a rebuild. To keep them,
+> sign with your own certificate: `SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/run-app.sh`.
+
+### Optional: semantic search
+
+Keyword search works out of the box. For semantic (meaning-based) search, download the on-device models (about 500 MB,
+Apple silicon):
+
+```bash
+./scripts/fetch-models.sh "$HOME/Library/Application Support/com.zerodoxxx.focusnotes/models"
+```
+
+Restart the app afterwards. The menu shows **Semantic search: On** once the models are found. See
+[docs/semantic-search.md](docs/semantic-search.md) for details.
+
+## Where your notes live
+
+Notes are saved in `~/Documents/focusnotes`:
+
+```text
+focusnotes/
+├── Inbox.md              # captures made outside a session
+├── Sessions/
+│   └── System Design.md  # one note per session
+├── <Quick note title>.md # quick notes written outside a session
+└── assets/               # area captures (images)
+```
+
+Each note is readable Markdown. Timestamps and source details live in invisible HTML comments, so the text itself stays
+clean:
 
 ```markdown
-# Inbox
+# System Design
 
-### System Design
-<!-- capture:a1b2c3d4-0000-4000-8000-000000000001 at=2026-10-14T13:04:58+05:30 app="Firefox" -->
+### Designing Data-Intensive Applications
+<!-- capture:… at=2026-10-14T13:04:58+05:30 app="Firefox" -->
 
-First paragraph.
-
-<!-- capture:a1b2c3d4-0000-4000-8000-000000000002 at=2026-10-14T13:05:10+05:30 app="Firefox" -->
-
-Second paragraph.
-
-## Tradeoffs
-<!-- subheading:a1b2c3d4-0000-4000-8000-000000000003 -->
-
-### System Design
-<!-- capture:a1b2c3d4-0000-4000-8000-000000000004 at=2026-10-14T13:05:25+05:30 app="Firefox" -->
-
-Third paragraph.
+Replication lag is the delay between a write on the leader and its visibility on followers.
 ```
 
-Browser suffixes are removed from source titles; empty titles fall back to the
-app, then “Unknown source”. Legacy dated capture blocks remain readable and are
-never rewritten. Session notes use `Sessions/<Title>.md`; starting the same cleaned
-filename again, ignoring case, resumes that note. Existing dated session notes
-can also resume in place. Images stay in `assets/`, with `../assets/` links from
-session notes.
+To keep notes somewhere else, such as an Obsidian vault, set the folder and restart the app:
 
-Area OCR uses preferred supported languages with accurate recognition and
-language correction. Classification has a 1.5-second budget: slower OCR stages
-an image and continues in the background to make it searchable. The acquisition
-lock covers interactive selection only; captures still commit in acquisition
-order. Captures, typed notes, and subheadings are journaled before append and replay without
-duplication. No polling or recurring timers run while idle.
+```bash
+defaults write com.zerodoxxx.focusnotes vaultPath "~/Obsidian/Notes"
+```
 
-Press **⌥⇧N** or choose **Write a Note…** to type Markdown with live inline
-preview. At rest the panel shows only your text; hover it for the top buttons (close,
-open as note, actions ⌘K, browse ⌘P, new ⌘N) and the footer. ⌘P browses pinned and recent
-notes (↩ write there, ⌘↩ open, ⌥↩ reveal), ⇧⌘P pins the destination note (app state, never
-written into the Markdown), and ⌘O saves like ⌘↩ then opens the note in your default
-Markdown app. ⌘N saves and opens a blank note. The caret and selection lines show dimmed syntax; other lines render
-without the syntax. Bullets display as •, and clickable task boxes support undo.
-The stored text stays Markdown. ⌘↩ (including keypad Enter) saves and appends to
-the active session; outside a session the footer says “Create note” and it creates a separate root note. Its title comes
-from the first non-empty line with Markdown removed, capped at a word boundary at
-60 characters (then “…”), or “Note yyyy-MM-dd HH.mm” if nothing remains. Filenames
-use the existing cleaning/collision rules (`Title.md`, `Title 2.md`). An ordinary
-first line equal to the untruncated title is omitted from the body; lists, tasks,
-quotes and code stay intact. Captures and subheadings still use Inbox without a
-session. Return inserts a new line and continues lists (removing an empty marker);
-Shift+Return inserts a plain newline, and Tab/Shift+Tab indent/outdent list items.
-Return during IME composition goes to the input method. Escape or
-clicking outside keeps an atomic `draft-note.md` in the app state directory,
-restored next time. Paste is plain text; ⌘Z/⇧⌘Z undo/redo. A pending capture saves
-first. Typed notes have invisible timestamped `<!-- note:… at=… -->` markers,
-appear with their note title and time in keyword and semantic search, and do not change the capture
-source. A heading typed in a note makes the next capture repeat its source heading.
-Successful saves clear the draft; empty input clears it without appending.
-New notes show “Note created” with their title; session appends show “Note added”.
-The journal retains the chosen path and original draft, so recovery reuses the
-same file and clears the draft after saving, including when the title line was removed.
+App state (drafts, the search index and pending saves) lives in
+`~/Library/Application Support/com.zerodoxxx.focusnotes`.
 
-See [docs/demo.md](docs/demo.md) for the complete workflow and self-test.
+## Development
+
+```bash
+swift build                     # build every target
+swift run CoreChecks            # storage, index and Markdown checks
+swift run OverlayGallery --check   # UI behaviour checks for the panels
+swift run OverlayGallery        # render UI snapshots to build/gallery/
+scripts/check-name.sh           # make sure the app name lives only in Config/app.env
+```
+
+The app name, bundle prefix and version are set in `Config/app.env`; nothing else hard-codes them.
+
+| Target | What it holds |
+| --- | --- |
+| `App` | The menu-bar app: shortcuts, capture flow, sessions, menu |
+| `Core` | Headless logic: the Markdown vault, journaling, the SQLite FTS5 search index |
+| `CaptureKit` | Global hotkeys, text selection and screen-area capture |
+| `OverlayKit` | Panels: quick note, search, toasts, capture input |
+| `EmbedKit` / `EmbedHelper` | The on-device embedding engine for semantic search |
+| `OverlayGallery` | UI snapshots and behaviour checks for `OverlayKit` |
+
+## Further reading
+
+- [docs/reference.md](docs/reference.md): detailed capture, storage and editor behaviour
+- [docs/quick-note-ui.md](docs/quick-note-ui.md): the quick-note panel's design
+- [docs/demo.md](docs/demo.md): a full walkthrough and the self-test
+- [docs/manual-tests.md](docs/manual-tests.md): manual test checklist
+- [docs/semantic-search.md](docs/semantic-search.md): how semantic search works
