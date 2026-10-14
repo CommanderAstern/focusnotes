@@ -1,0 +1,274 @@
+import CaptureKit
+import Core
+import Foundation
+import os
+
+enum CaptureTrigger: Sendable {
+    case selection, region
+
+    var hotkey: Hotkey { self == .selection ? .captureSelection : .captureRegion }
+}
+
+struct PendingCapture: Sendable {
+    enum Content: Sendable {
+        case text(String)
+        case image(png: Data, ocr: String?)
+    }
+
+    let id: UUID
+    let createdAt: Date
+    let trigger: CaptureTrigger
+    let content: Content
+    let source: CaptureSource
+    let subtitle: String
+    let deferredOCR: Task<OCRResult?, Never>?
+
+    init(id: UUID = UUID(), createdAt: Date = Date(), trigger: CaptureTrigger, content: Content,
+         source: CaptureSource, subtitle: String, deferredOCR: Task<OCRResult?, Never>? = nil) {
+        self.id = id; self.createdAt = createdAt; self.trigger = trigger
+        self.content = content; self.source = source; self.subtitle = subtitle; self.deferredOCR = deferredOCR
+    }
+}
+
+struct CapturePipeline: Sendable {
+    let vault: Vault
+    let sessions: SessionStore
+    let service: CaptureService
+    let index: SearchIndex
+    let semantic: SemanticIndexer
+    let monitor: VaultMonitor
+    let journal: CaptureJournal
+    let drafts: NoteDraftStore
+    let pins: NotePinStore
+    let calendar: Calendar
+    let logger: Logger
+
+    @concurrent
+    static func open(vaultRoot: URL, stateDirectory: URL, calendar: Calendar, modelsDirectory: URL? = nil) async throws -> Self {
+        let vault = Vault(root: vaultRoot)
+        try vault.prepare()
+        let index = try SearchIndex(vault: vault, databaseURL: stateDirectory.appendingPathComponent("index.sqlite"), calendar: calendar)
+        let semantic = SemanticIndexer(index: index, vault: vault, stateDirectory: stateDirectory,
+                                       modelsDirectory: modelsDirectory ?? stateDirectory.appendingPathComponent("models", isDirectory: true))
+        let logger = Logger(subsystem: AppInfo.bundleIdentifier, category: "pipeline")
+        let monitor = VaultMonitor(vault: vault) { notes, assets in
+            if notes { await Self.syncIndex(index: index, semantic: semantic, logger: logger) }
+            if assets, !Task.isCancelled { await Self.backfillAssets(vault: vault, index: index, semantic: semantic, logger: logger) }
+        }
+        let sessions = SessionStore(stateDirectory: stateDirectory, vault: vault, calendar: calendar, now: Date.init)
+        let writer = NoteWriter(vault: vault, calendar: calendar)
+        return Self(
+            vault: vault, sessions: sessions,
+            service: CaptureService(vault: vault, sessions: sessions, writer: writer, now: Date.init),
+            index: index,
+            semantic: semantic, monitor: monitor,
+            journal: CaptureJournal(stateDirectory: stateDirectory),
+            drafts: NoteDraftStore(stateDirectory: stateDirectory),
+            pins: NotePinStore(stateDirectory: stateDirectory),
+            calendar: calendar, logger: logger
+        )
+    }
+
+    func prepare(_ capture: PendingCapture, heading: String?, destination: Destination? = nil) async -> CaptureJob {
+        let content: CaptureContent
+        let png: Data?
+        let ocr: String?
+        switch capture.content {
+        case .text(let text):
+            content = .text(text); png = nil; ocr = nil
+        case .image(let data, let text):
+            let formatter = DateFormatter()
+            formatter.calendar = calendar; formatter.timeZone = calendar.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            content = .image(assetPath: "assets/\(formatter.string(from: capture.createdAt))-\(capture.id.uuidString.lowercased()).png")
+            png = data; ocr = text
+        }
+        let value = Capture(id: capture.id, createdAt: capture.createdAt, content: content, source: capture.source)
+        let prepared: PreparedCapture
+        if let destination { prepared = PreparedCapture(capture: value, destination: destination) }
+        else { prepared = await service.prepare(value, heading: heading) }
+        return CaptureJob(prepared: prepared, png: png, ocr: ocr, deferredOCR: capture.deferredOCR)
+    }
+
+    func commit(_ job: CaptureJob, pinOnSave: Bool? = nil,
+                onNoteSaved: (@MainActor @Sendable (SavedCapture, Bool) -> Void)? = nil) async throws -> SavedCapture {
+        let saved = try await service.save(job.prepared, png: job.png)
+        // A cache failure must not retry an already appended capture. Startup sync repairs it.
+        do {
+            try await index.reindex(note: saved.destination.url)
+            if let text = job.ocr, let png = job.png,
+               let asset = try await index.capture(id: saved.captureID)?.assetPath {
+                try await index.setImageText(assetPath: asset, text: text, fingerprint: SearchIndex.imageFingerprint(png))
+            }
+        } catch {
+            logger.error("Capture saved; index update failed: \(String(describing: error), privacy: .public)")
+        }
+        if let deferred = job.deferredOCR, let png = job.png, case .image(let asset) = job.prepared.capture.content {
+            Task.detached(priority: .utility) {
+                guard let result = await deferred.value else { return } // Missing text remains eligible for backfill.
+                do {
+                    try await index.setImageText(assetPath: asset, text: result.text, fingerprint: SearchIndex.imageFingerprint(png))
+                    await semantic.schedule()
+                } catch { logger.error("Deferred OCR cache update failed: \(String(describing: error), privacy: .public)") }
+            }
+        }
+        let pinFailed = try completeNoteSave(job, saved: saved, pinOnSave: pinOnSave)
+        try await journal.remove(id: saved.captureID)
+        Task.detached(priority: .utility) { await semantic.schedule() }
+        if let pinFailed { await onNoteSaved?(saved, pinFailed) }
+        return saved
+    }
+
+    /// Shared by interactive commits, shutdown retry and startup replay. Keep the
+    /// journal identity until pin handling and matching-draft cleanup have completed.
+    private func completeNoteSave(_ job: CaptureJob, saved: SavedCapture, pinOnSave: Bool?) throws -> Bool? {
+        guard case .note(let text) = job.prepared.capture.content else { return nil }
+        var pinFailed = false
+        try drafts.completeSave(matching: job.noteDraft ?? text, pinOnSave: pinOnSave) { intent in
+            guard intent, let path = vault.relativePath(of: saved.destination.url) else { return }
+            do { try pins.set(path, pinned: true) }
+            catch {
+                pinFailed = true
+                logger.error("Couldn't pin note: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return pinFailed
+    }
+
+    @discardableResult
+    func replayUnsaved(onNoteSaved: (@MainActor @Sendable (SavedCapture, Bool) -> Void)? = nil) async -> Int {
+        var restored = 0
+        do {
+            for url in try await journal.recordURLs() {
+                do {
+                    let job = try await journal.load(record: url)
+                    // A missing image may have been recovered as OCR text. Persist that
+                    // exact block before appending, including if cleanup later fails.
+                    try await journal.store(job)
+                    _ = try await commit(job, onNoteSaved: onNoteSaved)
+                    restored += 1
+                } catch {
+                    logger.error("Journal replay failed for \(url.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+                    if error is CaptureJournal.RecordError {
+                        do { try await journal.quarantine(record: url) }
+                        catch { logger.error("Journal quarantine failed: \(String(describing: error), privacy: .public)") }
+                    }
+                }
+            }
+        } catch { logger.error("Journal read failed: \(String(describing: error), privacy: .public)") }
+        logger.notice("Journal replay: restored=\(restored)")
+        return restored
+    }
+
+    func sync() async { await monitor.sync() }
+
+    private static func syncIndex(index: SearchIndex, semantic: SemanticIndexer, logger: Logger) async {
+        guard !Task.isCancelled else { return }
+        do {
+            let stats = try await index.sync()
+            logger.notice("Index sync: added=\(stats.added) updated=\(stats.updated) removed=\(stats.removed) unchanged=\(stats.unchanged)")
+            await semantic.schedule()
+        } catch {
+            logger.error("Index sync failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    func backfill() async { await monitor.backfill() }
+
+    private static func backfillAssets(vault: Vault, index: SearchIndex, semantic: SemanticIndexer, logger: Logger) async {
+        do {
+            for path in try await index.assetsMissingText() {
+                guard !Task.isCancelled else { return }
+                do {
+                    let data = try Data(contentsOf: assetURL(path, vault: vault))
+                    let fingerprint = SearchIndex.imageFingerprint(data)
+                    let result = try await OCR.recognize(pngData: data)
+                    guard !Task.isCancelled else { return }
+                    try await index.setImageText(assetPath: path, text: result.text, fingerprint: fingerprint)
+                } catch {
+                    logger.error("OCR backfill failed for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+            await semantic.schedule()
+        } catch {
+            logger.error("OCR backfill list failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    func assetURL(_ path: String) throws -> URL {
+        try Self.assetURL(path, vault: vault)
+    }
+
+    private static func assetURL(_ path: String, vault: Vault) throws -> URL {
+        let url = vault.root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
+        guard !path.hasPrefix("/"), url.path.hasPrefix(vault.root.path + "/") else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        return url
+    }
+
+    @concurrent
+    func region(png: Data, context: FrontmostContext, id: UUID = UUID(), createdAt: Date = Date(),
+                recognize: @escaping @Sendable (Data) async throws -> OCRResult = { try await OCR.recognize(pngData: $0) }) async -> PendingCapture {
+        let race = OCRBudgetRace()
+        let recognition = Task.detached(priority: .userInitiated) { () -> OCRResult? in
+            do { return try await recognize(png) }
+            catch {
+                logger.error("OCR failed; retaining image: \(String(describing: error), privacy: .public)")
+                return nil
+            }
+        }
+        Task { await race.resolve(.finished(await recognition.value)) }
+        let timer = Task {
+            do { try await Task.sleep(for: .milliseconds(1500)); await race.resolve(.expired) }
+            catch {} // An on-time result cancels the one-shot deadline.
+        }
+        let outcome = await race.wait()
+        timer.cancel()
+        guard case .finished(let recognized) = outcome else {
+            return PendingCapture(id: id, createdAt: createdAt, trigger: .region, content: .image(png: png, ocr: nil),
+                                  source: Self.source(context), subtitle: "Image", deferredOCR: recognition)
+        }
+        let result = recognized ?? OCRResult(text: "", lines: [], imageSize: .zero)
+        let classification = CaptureClassifier.classify(result)
+        logger.notice("Region classifier: decision=\(classification.decision.rawValue, privacy: .public) coverage=\(classification.metrics.textCoverage) confidence=\(classification.metrics.meanConfidence) lines=\(classification.metrics.lineCount)")
+        let preview = Self.firstLine(result.text)
+        return PendingCapture(
+            id: id, createdAt: createdAt,
+            trigger: .region,
+            content: classification.decision == .text ? .text(result.text) : .image(png: png, ocr: recognized?.text),
+            source: Self.source(context),
+            subtitle: classification.decision == .text ? "Text · \(preview)" : (preview.isEmpty ? "Image" : "Image · \(preview)")
+        )
+    }
+
+    static func selection(text: String, context: FrontmostContext) -> PendingCapture {
+        PendingCapture(trigger: .selection, content: .text(text), source: source(context), subtitle: firstLine(text))
+    }
+
+    static func source(_ context: FrontmostContext) -> CaptureSource {
+        CaptureSource(appName: context.appName, windowTitle: context.windowTitle)
+    }
+
+    static func firstLine(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return line.count > 100 ? String(line.prefix(99)) + "…" : line
+    }
+}
+
+/// An unstructured race returns at the deadline without waiting for Vision to stop.
+private actor OCRBudgetRace {
+    enum Outcome: Sendable { case finished(OCRResult?), expired }
+    private var outcome: Outcome?
+    private var continuation: CheckedContinuation<Outcome, Never>?
+    func resolve(_ value: Outcome) {
+        guard outcome == nil else { return }
+        outcome = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+    func wait() async -> Outcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation = $0 }
+    }
+}
