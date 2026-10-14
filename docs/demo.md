@@ -48,7 +48,7 @@ refresh whenever the menu opens.
    hover. Swapping cards transfers the on state; closing the card clears it.
    Quick notes are sticky: clicking outside or switching Spaces leaves the note visible.
    Losing key closes any open card. Its caret stops while another window has key. The first text click
-   places the caret; buttons and band drags work on the first click without activating notesflow.
+   places the caret; buttons and band drags work on the first click without activating focusnotes.
    **⌥⇧N** on a visible non-key note restores focus without rebuilding it or changing draft, caret
    or scroll; while key it closes, draft kept. Escape/✕ also keep a draft; reopening a closed
    note restores its caret at the end and shows **Draft kept**. A pinned title has a small pin
@@ -113,7 +113,7 @@ and state, prints a JSON verification summary, and exits. Add
 `--models <models directory>` to include the no-keyword-overlap semantic assertion;
 without model files the semantic part is reported as skipped and the test passes.
 For isolated quick-note pin-intent persistence, legacy migration, unpinned retry, shutdown/startup recovery and final pin-failure warning checks that do not require OCR, run
-`NOTESFLOW_SELF_TEST_QUICK_NOTE=1 .build-ui/out/Products/Debug/App --self-test <empty temporary directory>`.
+`QUICK_NOTE_SELF_TEST=1 .build-ui/out/Products/Debug/App --self-test <empty temporary directory>`.
 This uses the CLI self-test executable and temporary state, with no real app launch.
 
 Both modes verify the 1.5-second OCR budget with delayed recognition, subsequent

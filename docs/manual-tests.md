@@ -52,7 +52,7 @@ Run from the built app. Layout and behaviour are specified in `quick-note-ui.md`
 fixture without launching the real app, run this from the repo root:
 
 ```sh
-NOTESFLOW_GALLERY_SHORT_NOTE=1 .build-ui/out/Products/Debug/OverlayGallery --live editor
+GALLERY_SHORT_NOTE=1 .build-ui/out/Products/Debug/OverlayGallery --live editor
 ```
 
 Close with esc after testing; the live fixture includes sample Browse rows.
@@ -141,9 +141,9 @@ Close with esc after testing; the live fixture includes sample Browse rows.
 9. **Sticky focus:** Click another app after pinning and with each card open. The note stays visible
    at the same frame; the card closes and the caret stops. Hover still reveals the bands. The first
    text click places the caret and typing reaches the note, the first band-button click runs it, and
-   the first band drag moves it, without activating notesflow. While another app has focus, press
+   the first band drag moves it, without activating focusnotes. While another app has focus, press
    ⌥⇧N: the same note regains key with draft, caret and scroll unchanged. Press it again while key:
    it closes, draft kept. Switch Spaces/full-screen apps: the note follows and stays at its current
    level/position. Change screen parameters: it re-clamps on-screen. Input/Search still dismiss on
-   click-away and Space changes. Opening another notesflow panel, save, esc/✕, Open as Note and
+   click-away and Space changes. Opening another focusnotes panel, save, esc/✕, Open as Note and
    app quit still close the note.

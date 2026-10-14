@@ -105,11 +105,11 @@ Quick notes are sticky by default, independently of whether a panel is movable. 
 never closes the note. Losing key closes an Actions/Browse card and restores the note text as the
 window's first responder; the caret stops while the panel is not key and hover reveal still works.
 The first click in text places the caret; the first click on a visible button runs it; a band drag moves
-the panel immediately. These interactions borrow focus without activating notesflow.
+the panel immediately. These interactions borrow focus without activating focusnotes.
 
 ⌥⇧N while the note is visible but not key restores keyboard focus in the same window, preserving
 text, caret and scroll. While key, ⌥⇧N closes it and keeps the draft. Explicit closes remain ⌘↩ save,
-esc/✕, Open as Note, opening another notesflow panel, and app quit. Input and Search keep their
+esc/✕, Open as Note, opening another focusnotes panel, and app quit. Input and Search keep their
 existing dismiss-on-click-away and Space-change behaviour.
 
 ## 4. Cards (⌘K and ⌘P)

@@ -203,7 +203,7 @@ final class LiveGallery: NSObject {
                 }
             }
         case "editor":
-            editor.present(destination: "System Design", isPinned: false, draft: ProcessInfo.processInfo.environment["NOTESFLOW_GALLERY_SHORT_NOTE"] == "1" ? "First line\nSecond line" : editorSample, handlers: NoteEditorHandlers(
+            editor.present(destination: "System Design", isPinned: false, draft: ProcessInfo.processInfo.environment["GALLERY_SHORT_NOTE"] == "1" ? "First line\nSecond line" : editorSample, handlers: NoteEditorHandlers(
                 onDraft: { _ in }, onSubmit: { print("Submitted: \($0)"); finish() },
                 onNew: { print("New: \($0)"); finish() }, onOpenAsNote: { print("Open as note: \($0)"); finish() },
                 browseItems: { [

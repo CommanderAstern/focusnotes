@@ -1,4 +1,4 @@
-# notesflow
+# focusnotes
 
 This folder contains a Swift Package foundation for a native macOS app. The app captures selected text and screen regions without activating itself. Shared app logic lives in the headless `Core` library.
 
