@@ -1027,6 +1027,7 @@ final class AppController: NSObject, NSMenuDelegate {
     @objc private func menuScreenRecording() {
         afterMenu { if !CapturePermissions.screenCaptureAllowed { CapturePermissions.openSettings(for: .screenCapture) } }
     }
-    @objc private func menuQuit() { afterMenu { NSApp.terminate(nil) } }
+    /// A run-loop perform, not a main-queue block: terminate's terminate-later wait must leave the main queue free for the shutdown tasks.
+    @objc private func menuQuit() { NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0) }
     private func openNotesFolder() { NSWorkspace.shared.open(pipeline.vault.root) }
 }
