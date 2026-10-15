@@ -337,10 +337,14 @@ func checkUnavailableModels(_ checks: inout Checks, helper: URL, root: URL) asyn
         let client = try EmbedClient(helperExecutable: helper, modelsDirectory: directory)
         let info = try await client.ping()
         var failed = false
+        var errorText = ""
         do { _ = try await client.embedQuery("query") }
-        catch { failed = true }
+        catch { failed = true; errorText = String(describing: error) }
         let after = try await client.ping()
         checks.require(failed && after.processID == info.processID, "\(mode) models return an error and leave helper protocol usable")
+        if mode == "corrupt" {
+            checks.require(errorText.contains("failed integrity check"), "corrupt runtime is rejected by the integrity check")
+        }
         await client.shutdown()
     }
 }

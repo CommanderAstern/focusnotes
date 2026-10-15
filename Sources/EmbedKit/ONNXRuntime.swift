@@ -1,9 +1,13 @@
 import CORT
+import CryptoKit
 import Darwin
 import Foundation
 
 // These objects remain inside Embedder's lock and never cross actor boundaries.
 final class ONNXRuntime {
+    // Must match DYLIB_HASH in scripts/fetch-models.sh.
+    private static let expectedDylibSHA256 = "2a50a63e7f41f8d4d551d3ee47248df3864f6540109fce8ad520ca3b51af4b70"
+
     let api: UnsafePointer<OrtApi>
     let environment: OpaquePointer
     let allocator: UnsafeMutablePointer<OrtAllocator>
@@ -11,6 +15,10 @@ final class ONNXRuntime {
 
     init(directory: URL) throws {
         let path = directory.appendingPathComponent("libonnxruntime.dylib").path
+        // Verify the exact bytes we are about to load; never dlopen an unverified library.
+        guard (try? Self.sha256(ofFileAt: path)) == Self.expectedDylibSHA256 else {
+            throw EmbeddingError.runtime("ONNX Runtime library failed integrity check: \(path)")
+        }
         guard let library = dlopen(path, RTLD_NOW | RTLD_LOCAL) else {
             throw EmbeddingError.runtime("dlopen: \(dlerror().map { String(cString: $0) } ?? path)")
         }
@@ -48,6 +56,17 @@ final class ONNXRuntime {
     deinit {
         api.pointee.ReleaseEnv(environment)
         dlclose(library)
+    }
+
+    /// Streams the file in 1 MiB chunks so the runtime library is never fully loaded into memory.
+    private static func sha256(ofFileAt path: String) throws -> String {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     static func check(_ status: OpaquePointer?, api: UnsafePointer<OrtApi>) throws {
