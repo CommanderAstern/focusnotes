@@ -37,7 +37,11 @@ public enum NoteTitle {
         var bounded = ""
         for character in stem.prefix(120) {
             let piece = String(character)
-            guard bounded.utf8.count + piece.utf8.count <= 220 else { break }
+            // Filesystem normalization also rejects long combining sequences,
+            // even far below NAME_MAX. Count the canonical decomposition because
+            // one mark (for example U+0344) can expand into multiple scalars.
+            guard piece.decomposedStringWithCanonicalMapping.unicodeScalars.count <= 32,
+                  bounded.utf8.count + piece.utf8.count <= 220 else { break }
             bounded += piece
         }
         // A single grapheme may contain hundreds of combining marks. Splitting

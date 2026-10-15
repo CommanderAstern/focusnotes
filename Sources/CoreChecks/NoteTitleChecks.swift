@@ -33,7 +33,13 @@ func checkNoteTitle() throws {
     let root = try checkMakeDirectory("unicode-titles")
     defer { checkRemoveDirectory(root) }
     let vault = Vault(root: root)
-    for title in [String(repeating: "👨‍👩‍👧‍👦", count: 40), "a" + String(repeating: "\u{0301}", count: 500)] {
+    let acceptedCluster = "a" + String(repeating: "\u{0301}", count: 31)
+    let rejectedCluster = "a" + String(repeating: "\u{0301}", count: 32)
+    let expandingCluster = "a" + String(repeating: "\u{0344}", count: 16)
+    try require(NoteTitle.fileStem(for: acceptedCluster) == acceptedCluster, "a representable combining cluster should remain intact")
+    try require(NoteTitle.fileStem(for: rejectedCluster) == "Untitled", "an unrepresentable combining cluster should use a safe fallback")
+    try require(NoteTitle.fileStem(for: expandingCluster) == "Untitled", "normalization expansion must count toward the combining limit")
+    for title in [String(repeating: "👨‍👩‍👧‍👦", count: 40), "a" + String(repeating: "\u{0301}", count: 500), acceptedCluster, rejectedCluster, expandingCluster] {
         let stem = NoteTitle.fileStem(for: title)
         try require(!stem.isEmpty && stem.utf8.count <= 220, "Unicode filename should fit the byte budget")
         let first = vault.uniqueNoteURL(forTitle: title)
