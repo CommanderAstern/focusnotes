@@ -1,5 +1,5 @@
 import AppKit
-import CaptureKit
+@_spi(Testing) import CaptureKit
 import Darwin
 import Foundation
 
@@ -17,31 +17,47 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 
 @MainActor
 func checkHotkeys() throws {
-    let center = HotkeyCenter()
-    defer { center.unregisterAll() }
     let defaults: [Hotkey] = [.captureSelection, .captureRegion, .search, .toggleSession, .writeNote, .addSubheading, .openLibrary]
     let expected = ["⌥⇧C", "⌥⇧S", "⌥⇧F", "⌥⇧A", "⌥⇧N", "⌥⇧H", "⌥⇧L"]
-    var failures: [String] = []
+    let expectedDefinitions = [
+        Hotkey(keyCode: 8, modifiers: [.option, .shift]), Hotkey(keyCode: 1, modifiers: [.option, .shift]),
+        Hotkey(keyCode: 3, modifiers: [.option, .shift]), Hotkey(keyCode: 0, modifiers: [.option, .shift]),
+        Hotkey(keyCode: 45, modifiers: [.option, .shift]), Hotkey(keyCode: 4, modifiers: [.option, .shift]),
+        Hotkey(keyCode: 37, modifiers: [.option, .shift])
+    ]
     for (index, hotkey) in defaults.enumerated() {
-        try require(hotkey.displayString == expected[index], "Wrong hotkey label: \(hotkey.displayString)")
-        if case .failure(let error) = center.register(hotkey, id: UInt32(index + 1), handler: {}) {
-            failures.append("Default \(hotkey.displayString) could not register: \(error)")
-        }
+        try require(hotkey == expectedDefinitions[index] && hotkey.displayString == expected[index],
+                    "Wrong production hotkey definition: \(hotkey.displayString)")
     }
-    if !failures.isEmpty { throw CheckFailure.failed(failures.joined(separator: "\n")) }
-    guard case .failure(.conflict) = center.register(.captureSelection, id: 100, handler: {}) else {
-        throw CheckFailure.failed("Duplicate shortcut did not return conflict")
+    let testCenter = HotkeyCenter()
+    defer { testCenter.unregisterAll() }
+    var testHotkey: Hotkey?
+    for keyCode in UInt32(0)...UInt32(127) {
+        let candidate = Hotkey(keyCode: keyCode, modifiers: [.control, .option, .shift])
+        switch testCenter.register(candidate, id: 1, handler: {}) {
+        case .success:
+            testHotkey = candidate
+        case .failure(.conflict):
+            continue
+        case .failure(let error):
+            throw CheckFailure.failed("Could not install a temporary hotkey test chord: \(error)")
+        }
+        if testHotkey != nil { break }
+    }
+    guard let testHotkey else { throw CheckFailure.failed("Hotkey checks inconclusive: every temporary test chord is occupied") }
+    guard case .failure(.duplicateID) = testCenter.register(testHotkey, id: 1, handler: {}) else {
+        throw CheckFailure.failed("Reusing a hotkey registration ID did not report duplicateID")
     }
     let otherCenter = HotkeyCenter()
     defer { otherCenter.unregisterAll() }
-    guard case .failure(.conflict) = otherCenter.register(.captureSelection, id: 1, handler: {}) else {
-        throw CheckFailure.failed("Shortcut conflict across centers was not detected")
+    guard case .failure(.conflict) = otherCenter.register(testHotkey, id: 2, handler: {}) else {
+        throw CheckFailure.failed("A temporary shortcut conflict across centers was not detected")
     }
-    center.unregister(id: 1)
-    if case .failure(let error) = otherCenter.register(.captureSelection, id: 1, handler: {}) {
-        throw CheckFailure.failed("Unregistered shortcut was not released: \(error)")
+    testCenter.unregister(id: 1)
+    if case .failure(let error) = otherCenter.register(testHotkey, id: 2, handler: {}) {
+        throw CheckFailure.failed("Unregistered test shortcut was not released: \(error)")
     }
-    print("Hotkeys: PASS (seven defaults, duplicate conflict, unregister).")
+    print("Hotkeys: PASS (seven production definitions, temporary conflict and unregister).")
 }
 
 @MainActor
@@ -118,12 +134,23 @@ func checkOCRAndClassifier() async throws {
     print("Classifier: PASS (paragraph/code text; diagram/gradient/table image).")
 }
 
+func checkRegionCaptureProcessDisposition() throws {
+    try require(RegionCapturer.processDisposition(status: 0, outputExists: false) == .cancelled,
+                "An interactive Escape result without a file should remain silent cancellation")
+    try require(RegionCapturer.processDisposition(status: 1, outputExists: false) == .failed(status: 1),
+                "A failed screenshot process without output must be reported")
+    try require(RegionCapturer.processDisposition(status: 0, outputExists: true) == .captured,
+                "A successful screenshot process with output should continue to image loading")
+    print("Region capture: PASS (cancel, process failure, and captured result classification).")
+}
+
 // A running app can own the defaults; still exercise pasteboard, OCR and classification.
 var hotkeyFailure: Error?
 do { try checkHotkeys() } catch { hotkeyFailure = error }
 do {
     try checkPasteboard()
     try await checkOCRAndClassifier()
+    try checkRegionCaptureProcessDisposition()
     if let hotkeyFailure { throw hotkeyFailure }
 } catch {
     FileHandle.standardError.write(Data("Capture checks failed: \(error)\n".utf8))

@@ -15,6 +15,13 @@ public enum RegionCaptureError: Error, Equatable, Sendable {
     case processFailed(status: Int32)
 }
 
+@_spi(Testing)
+public enum RegionCaptureProcessDisposition: Equatable, Sendable {
+    case cancelled
+    case captured
+    case failed(status: Int32)
+}
+
 @MainActor
 public enum RegionCapturer {
     /// Does not request permission or activate the app. Capture the context at hotkey entry
@@ -24,6 +31,13 @@ public enum RegionCapturer {
         guard CapturePermissions.screenCaptureAllowed else { return .permissionNeeded }
         guard !Task.isCancelled else { return .cancelled }
         return try await performCapture(context: context)
+    }
+
+    /// Keeps the documented Escape path distinct from a failed screencapture process.
+    @_spi(Testing)
+    nonisolated public static func processDisposition(status: Int32, outputExists: Bool) -> RegionCaptureProcessDisposition {
+        guard status == 0 else { return .failed(status: status) }
+        return outputExists ? .captured : .cancelled
     }
 
     @concurrent
@@ -48,9 +62,14 @@ public enum RegionCapturer {
                 continuation.resume(throwing: error)
             }
         }
-        // Apple's selection UI exits without creating a file when the user presses Escape.
-        guard FileManager.default.fileExists(atPath: file.path) else { return .cancelled }
-        guard status == 0 else { throw RegionCaptureError.processFailed(status: status) }
+        switch processDisposition(status: status, outputExists: FileManager.default.fileExists(atPath: file.path)) {
+        case .cancelled:
+            return .cancelled
+        case .failed(let status):
+            throw RegionCaptureError.processFailed(status: status)
+        case .captured:
+            break
+        }
         guard !Task.isCancelled else { return .cancelled }
         return .captured(RegionCapture(pngData: try Data(contentsOf: file), context: context))
     }
