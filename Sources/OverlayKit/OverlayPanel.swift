@@ -149,9 +149,9 @@ public final class OverlayPanel: NSPanel, NSWindowDelegate {
         }
         if isSticky && [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type), !isKeyWindow { makeKey() }
         super.sendEvent(event)
-        if [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseDown].contains(event.type),
+        if [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseDown, .scrollWheel].contains(event.type),
            let editor = contentView as? NoteEditorView {
-            editor.updatePointer(at: editor.convert(event.locationInWindow, from: nil))
+            editor.updatePointer(at: editor.convert(event.locationInWindow, from: nil), hover: event.type != .scrollWheel)
         }
     }
     public func windowDidResignKey(_ notification: Notification) {

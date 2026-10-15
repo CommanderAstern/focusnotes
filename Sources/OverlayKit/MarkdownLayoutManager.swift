@@ -340,12 +340,13 @@ final class MarkdownLayoutManager: NSLayoutManager {
     /// Coordinates are in the text container. A toggle changes only the task's
     /// one-character state; normal AppKit editing provides undo and draft writes.
     func checkbox(at point: NSPoint, in container: NSTextContainer) -> NSRange? {
-        guard let storage = textStorage, storage.length > 0 else { return nil }
+        guard let storage = textStorage, storage.length > 0, numberOfGlyphs > 0 else { return nil }
         let source = storage.string as NSString
+        let glyph = glyphIndex(for: point, in: container, fractionOfDistanceThroughGlyph: nil)
+        let line = source.lineRange(for: NSRange(location: min(characterIndexForGlyph(at: glyph), storage.length - 1), length: 0))
         var result: NSRange?
-        storage.enumerateAttribute(MarkdownStyler.task, in: NSRange(location: 0, length: storage.length)) { value, marker, stop in
+        storage.enumerateAttribute(MarkdownStyler.task, in: line) { value, marker, stop in
             guard value is Bool, !isBlockMarkerActive(at: marker.location) else { return }
-            let line = source.lineRange(for: NSRange(location: marker.location, length: 0))
             guard checkboxRect(for: line, in: container).contains(point) else { return }
             let bracket = source.range(of: "[", options: [], range: marker)
             guard bracket.location != NSNotFound else { return }

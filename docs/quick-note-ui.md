@@ -132,7 +132,7 @@ Actions and Browse are floating overlays in **one nonactivating window**. The no
   Its insertion point is `brandAccent`; the first click focuses the field for typing even when another app is
   frontmost. Card backgrounds, rows and scroll documents also accept the first click without activating the agent.
 - The pointer appears on the first movement after typing, even though the agent remains inactive. It is an arrow
-  over bands, chrome and cards, and an I-beam over note text and filter fields. Hover selects an enabled row with
+  over bands, chrome and cards, and an I-beam over note text and filter fields. A rendered task checkbox (the click target that toggles it) shows the pointing hand; a raw marker keeps the I-beam. Hover selects an enabled row with
   the keyboard highlight; a click runs the Actions row or chooses Write here in Browse. Disabled Actions neither
   highlight nor run. Row labels and icons share the row hit target.
 - Selected row: the quiet fill (`labelColor` at 8%), radius 6, 4pt inset from the card sides. Never the accent.

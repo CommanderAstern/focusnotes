@@ -168,7 +168,7 @@ public enum OverlayTheme {
     public static let warningSymbol = "exclamationmark.triangle.fill"
     public static let sessionSymbol = "record.circle"
     public static let copiedSymbol = "doc.on.doc.fill"
-    public static let successColor = NSColor.controlAccentColor
+    public static let successColor = brandAccent
     public static let warningColor = NSColor.systemOrange
     public static let sessionColor = NSColor.systemRed
     public static let copiedColor = NSColor.controlAccentColor

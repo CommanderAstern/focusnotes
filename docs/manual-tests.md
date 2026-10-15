@@ -99,7 +99,7 @@ Close with esc after testing; the live fixture includes sample Browse rows.
    Open, swap or close cards during a text resize: the note animation continues without jumping.
    **Pointer and mouse:** With another app still active, type in the note and each card filter, then move
    the mouse. The pointer must reappear on the first movement: arrow over bands/chrome/card rows, I-beam
-   over note text/filter fields. Hover must select enabled rows just like ↑/↓; click runs Actions or Write
+   over note text/filter fields. A rendered task checkbox shows the pointing hand. Hover must select enabled rows just like ↑/↓; click runs Actions or Write
    here in Browse, including clicks on labels/icons. Disabled Actions do nothing and do not highlight.
    While another app is frontmost, click the filter once and type: that first click focuses it, it keeps
    focus and shows a coral caret. Check the first click on a row and in the scroll list as well. Any system input-source/Caps Lock

@@ -157,12 +157,30 @@ final class NoteTextView: NSTextView {
         }
         breakUndoCoalescing()
     }
+    /// The checkbox range under a point in this view's coordinates; nil unless one is rendered there.
+    func checkbox(at point: NSPoint) -> NSRange? {
+        guard !hasMarkedText(), let container = textContainer, let manager = markdownLayout else { return nil }
+        return manager.checkbox(at: NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y), in: container)
+    }
+    /// True when the point is scrolled into view and the panel's hit test lands on this view, not a card or chrome.
+    func isExposed(at point: NSPoint) -> Bool {
+        guard visibleRect.contains(point), let host = window?.contentView?.superview else { return false }
+        return window?.contentView?.hitTest(host.convert(point, from: self)) === self
+    }
+    func isOverCheckbox(at point: NSPoint) -> Bool { isExposed(at: point) && checkbox(at: point) != nil }
+    /// One answer per position: over a rendered checkbox only the hand is set, so super's I-beam never flashes first;
+    /// over a card or band the first-responder text view must not set its I-beam at all, `updatePointer` owns those.
+    private func pointerEvent(_ event: NSEvent, _ forward: (NSEvent) -> Void) {
+        let point = convert(event.locationInWindow, from: nil)
+        if isOverCheckbox(at: point) { NSCursor.pointingHand.set() } else if isExposed(at: point) { forward(event) }
+    }
+    override func cursorUpdate(with event: NSEvent) { pointerEvent(event) { super.cursorUpdate(with: $0) } }
+    override func mouseEntered(with event: NSEvent) { pointerEvent(event) { super.mouseEntered(with: $0) } }
+    override func mouseMoved(with event: NSEvent) { pointerEvent(event) { super.mouseMoved(with: $0) } }
     override func mouseDown(with event: NSEvent) {
         onMouseDown?()
-        guard !hasMarkedText(), let container = textContainer, let manager = markdownLayout else { super.mouseDown(with: event); return }
         let point = convert(event.locationInWindow, from: nil)
-        let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
-        guard let state = manager.checkbox(at: local, in: container) else { super.mouseDown(with: event); return }
+        guard let state = checkbox(at: point) else { super.mouseDown(with: event); return }
         let old = (self.string as NSString).substring(with: state)
         let replacement = old == " " ? "x" : " "
         breakUndoCoalescing()
@@ -542,19 +560,21 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
     private func applyReveal(animated: Bool) { setRevealed(pointerInside || holdsReveal, animated: animated) }
     /// Cursor rects and NSTextView's automatic unhide assume an active application. This panel borrows
     /// focus while its agent remains inactive, so handle the first movement explicitly, after AppKit.
-    func updatePointer(at point: NSPoint) {
+    /// Scrolling passes `hover: false` so a list scrolling under a still pointer keeps its selection.
+    func updatePointer(at point: NSPoint, hover: Bool = true) {
         let inside = noteRect.contains(point)
         if inside != pointerInside { pointerInside = inside; applyReveal(animated: true) }
         NSCursor.setHiddenUntilMouseMoves(false)
         let hit = hitTest(convert(point, to: superview))
-        var ancestor = hit
+        var ancestor = hover ? hit : nil
         while let view = ancestor, view !== self {
             if let row = view as? NoteCardRowView { row.hover(); break }
             ancestor = view.superview
         }
         let overFilter = card.map { $0.field.frame.contains($0.convert(point, from: self)) } ?? false
         let overText = card?.frame.contains(point) != true && scroll.frame.contains(noteSurface.convert(point, from: self))
-        (overFilter || overText ? NSCursor.iBeam : NSCursor.arrow).set()
+        let overCheckbox = overText && textView.isOverCheckbox(at: textView.convert(point, from: self))
+        (overCheckbox ? NSCursor.pointingHand : overFilter || overText ? NSCursor.iBeam : NSCursor.arrow).set()
     }
     override func mouseEntered(with event: NSEvent) { updatePointer(at: convert(event.locationInWindow, from: nil)) }
     override func mouseMoved(with event: NSEvent) { updatePointer(at: convert(event.locationInWindow, from: nil)) }

@@ -1226,6 +1226,31 @@ private func checkFloatingCards() async throws {
     try move(mousePanel, root: mouseRoot, to: NSPoint(x: 10, y: 10))
     try require(NSCursor.current == NSCursor.arrow, "Bands must use the arrow cursor")
     try key(53)
+    // A rendered checkbox shows the pointing hand; the same line's text keeps the I-beam.
+    guard let taskText = descendants(mouseRoot).compactMap({ $0 as? NSTextView }).first(where: { $0.accessibilityLabel() == "Note text" }) else { throw GalleryError("Task text missing") }
+    taskText.insertText("- [ ] one\ntwo", replacementRange: NSRange(location: 0, length: 0))
+    taskText.setSelectedRange(NSRange(location: (taskText.string as NSString).length, length: 0))
+    try await settle()
+    mouseRoot.layoutSubtreeIfNeeded()
+    guard let taskManager = taskText.layoutManager, let taskContainer = taskText.textContainer else { throw GalleryError("Task layout missing") }
+    taskManager.ensureLayout(for: taskContainer)
+    let taskGlyph = taskManager.glyphIndexForCharacter(at: 3)
+    let taskLine = taskManager.lineFragmentRect(forGlyphAt: taskGlyph, effectiveRange: nil)
+    let taskY = taskText.textContainerOrigin.y + taskLine.minY + taskManager.location(forGlyphAt: taskGlyph).y - OverlayTheme.editorFont.capHeight / 2
+    try move(mousePanel, root: mouseRoot, to: mouseRoot.convert(NSPoint(x: taskText.textContainerOrigin.x + OverlayTheme.editorCheckboxSize / 2, y: taskY), from: taskText))
+    try require(NSCursor.current == NSCursor.pointingHand, "A rendered checkbox must use the pointing hand")
+    try move(mousePanel, root: mouseRoot, to: mouseRoot.convert(NSPoint(x: taskText.textContainerOrigin.x + 120, y: taskY), from: taskText))
+    try require(NSCursor.current == NSCursor.iBeam, "Task text must keep the I-beam")
+    // With the caret on the task line its marker is raw, so the same spot is plain text.
+    let checkboxPoint = mouseRoot.convert(NSPoint(x: taskText.textContainerOrigin.x + OverlayTheme.editorCheckboxSize / 2, y: taskY), from: taskText)
+    taskText.setSelectedRange(NSRange(location: 3, length: 0))
+    try await settle()
+    try move(mousePanel, root: mouseRoot, to: checkboxPoint)
+    try require(NSCursor.current == NSCursor.iBeam, "A raw task marker must keep the I-beam")
+    taskText.setSelectedRange(NSRange(location: (taskText.string as NSString).length, length: 0))
+    try await settle()
+    try move(mousePanel, root: mouseRoot, to: checkboxPoint)
+    try require(NSCursor.current == NSCursor.pointingHand, "Moving the caret off the task line must render the checkbox again")
     // Editing while a card remains attached must resize just as editing without a card does.
     guard let textView = descendants(mouseRoot).compactMap({ $0 as? NSTextView }).first(where: { $0.accessibilityLabel() == "Note text" }) else { throw GalleryError("Text missing") }
     let oldNote = OverlayPreview.noteFrame(in: mousePanel)
