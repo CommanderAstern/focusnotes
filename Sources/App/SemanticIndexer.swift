@@ -11,6 +11,7 @@ struct SemanticHits: Sendable {
 
 /// Coordinates disposable vectors. Models and runtime stay in EmbedHelper.
 actor SemanticIndexer {
+    private static let defaultRetryDelays: [Duration] = [.seconds(5), .seconds(15), .seconds(60), .seconds(300), .seconds(900)]
     private static let embeddingModelFiles = [
         "onnx/model_quantized.onnx", "onnx/model_quantized.onnx_data",
         "onnx/vision_encoder_q4.onnx", "onnx/vision_encoder_q4.onnx_data"
@@ -22,20 +23,33 @@ actor SemanticIndexer {
     private let databaseURL: URL
     private let helperExecutable: URL
     private let logger = Logger(subsystem: AppInfo.bundleIdentifier, category: "semantic")
+    private let retryDelays: [Duration]
+    private let testingReconciler: (@Sendable () async throws -> Void)?
     private var enabled: Bool
     private var store: VectorStore?
     private var client: EmbedClient?
     private var debounce: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private var job: Task<Void, Never>?
     private var rerun = false
+    private var retryAttempt = 0
+    private var stopped = false
 
-    init(index: SearchIndex, vault: Vault, stateDirectory: URL, modelsDirectory: URL) {
+    init(index: SearchIndex, vault: Vault, stateDirectory: URL, modelsDirectory: URL,
+         retryDelaysForTesting: [Duration]? = nil,
+         testingReconciler: (@Sendable () async throws -> Void)? = nil) {
         self.index = index; self.vault = vault; self.modelsDirectory = modelsDirectory
         self.databaseURL = stateDirectory.appendingPathComponent("vectors.sqlite")
+        if let retryDelaysForTesting, !retryDelaysForTesting.isEmpty {
+            self.retryDelays = retryDelaysForTesting
+        } else {
+            self.retryDelays = Self.defaultRetryDelays
+        }
+        self.testingReconciler = testingReconciler
         // Bundle lookup in production; sibling product permits SwiftPM self-tests.
         self.helperExecutable = Bundle.main.url(forAuxiliaryExecutable: "EmbedHelper")
             ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("EmbedHelper")
-        self.enabled = Self.modelsInstalled(in: modelsDirectory)
+        self.enabled = testingReconciler != nil || Self.modelsInstalled(in: modelsDirectory)
     }
 
     nonisolated static func modelsInstalled(in directory: URL) -> Bool {
@@ -48,15 +62,23 @@ actor SemanticIndexer {
     }
 
     func setEnabled(_ value: Bool) {
+        guard !stopped else { return }
         guard enabled != value else { return }
         enabled = value
         if value { schedule() }
-        else { debounce?.cancel(); debounce = nil; job?.cancel(); rerun = false }
+        else {
+            debounce?.cancel(); debounce = nil
+            retryTask?.cancel(); retryTask = nil
+            job?.cancel(); rerun = false
+            retryAttempt = 0
+        }
     }
 
-    /// Cancels only the timer, never an inference already warming the helper.
+    /// Replaces pending timers without cancelling an inference already warming the helper.
     func schedule() {
-        guard enabled else { return }
+        guard enabled, !stopped else { return }
+        // A real vault change should get an earlier attempt than a pending backoff.
+        retryTask?.cancel(); retryTask = nil
         debounce?.cancel()
         debounce = Task.detached(priority: .utility) { [weak self] in
             do { try await Task.sleep(for: .seconds(2)) }
@@ -68,18 +90,76 @@ actor SemanticIndexer {
 
     private func startJob() {
         debounce = nil
-        guard enabled else { return }
+        guard enabled, !stopped else { return }
+        retryTask?.cancel(); retryTask = nil
         guard job == nil else { rerun = true; return }
+        let testingReconciler = testingReconciler
         job = Task.detached(priority: .utility) { [self] in
-            do { try await reconcile() }
-            catch { logger.error("Embedding deferred: \(String(describing: error), privacy: .public)") }
-            await finishedJob()
+            var failed = false
+            do {
+                if let testingReconciler { try await testingReconciler() }
+                else { try await reconcile() }
+            }
+            catch {
+                if !Task.isCancelled && !(error is CancellationError) {
+                    logger.error("Embedding deferred: \(String(describing: error), privacy: .public)")
+                    failed = true
+                }
+            }
+            await finishedJob(failed: failed)
         }
     }
 
-    private func finishedJob() {
+    private func finishedJob(failed: Bool) {
         job = nil
+        guard !stopped else { rerun = false; return }
+        // Changed-event reruns must not turn a persistent helper failure into a tight loop.
+        if failed {
+            rerun = false
+            scheduleRetry()
+            return
+        }
+        // A successful pass, including one followed by a queued rerun, starts a
+        // fresh retry budget if that rerun encounters a new failure.
+        retryAttempt = 0
         if rerun { rerun = false; startJob() }
+    }
+
+    private func scheduleRetry() {
+        guard enabled, !stopped else { return }
+        retryTask?.cancel()
+        let delay = retryDelays[min(retryAttempt, retryDelays.count - 1)]
+        retryAttempt += 1
+        retryTask = Task.detached(priority: .utility) { [weak self] in
+            do { try await Task.sleep(for: delay) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            await self?.retryFired()
+        }
+    }
+
+    private func retryFired() {
+        retryTask = nil
+        guard enabled, !stopped else { return }
+        startJob()
+    }
+
+    /// Permanently stops retries and in-flight work when the owning app accepts termination.
+    func stop() async {
+        guard !stopped else { await client?.close(); return }
+        stopped = true
+        enabled = false
+        debounce?.cancel(); debounce = nil
+        retryTask?.cancel(); retryTask = nil
+        rerun = false
+        let active = job
+        active?.cancel()
+        // Warmup and search may have obtained the client before `stopped` was
+        // set. Close first so it interrupts their on-wire polls and rejects late
+        // sends; ordinary task cancellation alone must drain transport framing.
+        await client?.close()
+        await active?.value
+        job = nil
     }
 
     /// Used by the permission-free self-test; production never waits for backfill.
@@ -104,7 +184,7 @@ actor SemanticIndexer {
         return try resources()
     }
 
-    private func isEnabled() -> Bool { enabled }
+    private func isEnabled() -> Bool { enabled && !stopped }
 
     // Snapshot/SQLite/file work runs on the detached job, outside this actor.
     // Only resource ownership and scheduling need the coordinator's isolation.
@@ -143,22 +223,29 @@ actor SemanticIndexer {
             }
         }
         try await embedBatch(batch, client: client, store: store)
+        var deferredImageError: Error?
         for block in blocks where block.kind == .image {
             try Task.checkCancellation()
             guard await isEnabled(), Self.imagesAllowed else { return }
+            guard let path = block.assetPath else { continue }
+            let url = vault.root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
+            guard !path.hasPrefix("/"), url.path.hasPrefix(vault.root.path + "/") else { continue }
             do {
-                guard let path = block.assetPath else { continue }
-                let url = vault.root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
-                guard !path.hasPrefix("/"), url.path.hasPrefix(vault.root.path + "/") else { continue }
                 let fingerprint = try EmbeddingFingerprint.image(at: url)
                 guard fingerprints[block.key] != fingerprint else { continue }
                 let png = try Data(contentsOf: url)
                 let vector = try await client.embedImage(png)
                 try Task.checkCancellation()
                 try store.upsert(key: block.key, vector: vector, fingerprint: fingerprint)
-            } catch is CancellationError { throw CancellationError() }
-            catch { logger.error("Image embedding deferred for \(block.key, privacy: .public): \(String(describing: error), privacy: .public)") }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                logger.error("Image embedding deferred for \(block.key, privacy: .public): \(String(describing: error), privacy: .public)")
+                if deferredImageError == nil { deferredImageError = error }
+            }
         }
+        if let deferredImageError { throw deferredImageError }
     }
 
     nonisolated private func embedBatch(_ batch: [(key: String, body: String, title: String, fingerprint: String)], client: EmbedClient, store: VectorStore) async throws {
@@ -180,7 +267,7 @@ actor SemanticIndexer {
     }
 
     func warm() async {
-        guard enabled else { return }
+        guard enabled, !stopped else { return }
         do { _ = try await resources().0.ping() }
         catch { logger.error("Helper warmup failed: \(String(describing: error), privacy: .public)") }
     }

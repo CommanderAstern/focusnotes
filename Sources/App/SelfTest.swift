@@ -15,10 +15,11 @@ extension AppController {
     func runSelfTest() async throws -> String {
         try checkMenuKeyEquivalents()
         try await checkAppReliability()
+        try await checkSemanticRetryRecovery()
         try await checkNoteDraftStoreScheduling()
         if ProcessInfo.processInfo.environment["QUICK_NOTE_SELF_TEST"] == "1" {
             try await checkQuickNotePinPersistence()
-            return "{\"ok\":true,\"noteDraftPinPersistenceVerified\":true,\"legacyDraftMigrationVerified\":true,\"draftPinRetryVerified\":true,\"pinStorageFailureNonfatalVerified\":true,\"draftPinRecoveryVerified\":true,\"finalPinFailureToastVerified\":true}"
+            return "{\"ok\":true,\"noteDraftPinPersistenceVerified\":true,\"legacyDraftMigrationVerified\":true,\"draftPinRetryVerified\":true,\"pinStorageFailureNonfatalVerified\":true,\"draftPinRecoveryVerified\":true,\"finalPinFailureToastVerified\":true,\"semanticRetryRecoveryVerified\":true}"
         }
         let externalNote = pipeline.vault.root.appendingPathComponent("External Edit.md")
         guard FileManager.default.createFile(atPath: externalNote.path, contents: Data("# External Edit\n\n".utf8)) else {
@@ -90,19 +91,33 @@ extension AppController {
             guard let task = commitPending() else { throw SelfTestFailure("Semantic capture was not pending") }
             semanticCapture = try await task.value
         }
-        // Exercise the asynchronous termination drain, including a pending default commit.
-        await stage(CapturePipeline.selection(text: "shutdownneedle pending capture", context: context))
-        _ = await beginTermination().value
-        guard !pipeline.monitor.isRunning else { throw SelfTestFailure("Vault watcher remained running on termination") }
+        if let deferredOCR = imagePending.deferredOCR {
+            let completion = SelfTestCompletion()
+            Task.detached(priority: .utility) {
+                _ = await deferredOCR.value
+                await completion.finish()
+            }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+            while !(await completion.isFinished()), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard await completion.isFinished() else { throw SelfTestFailure("Deferred OCR did not finish within 90 seconds") }
+        }
 
-        let stats = try await pipeline.index.sync()
+        // Join deferred OCR and its detached index update before checking vector backfill.
+        _ = try await pipeline.index.sync()
         let hits = try await pipeline.index.search("selftestneedle")
-        let ocrHits = try await pipeline.index.search("demoimagekeyword")
-        let shutdownHits = try await pipeline.index.search("shutdownneedle")
+        var ocrHits: [SearchHit] = []
+        let ocrSearchDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < ocrSearchDeadline {
+            ocrHits = try await pipeline.index.search("demoimagekeyword")
+            if ocrHits.contains(where: { $0.captureID == image.captureID }) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let imageHit = try await pipeline.index.capture(id: image.captureID)
         let textHit = try await pipeline.index.capture(id: text.captureID)
         let active = await pipeline.sessions.current()
-        guard hits.count == 3, ocrHits.count == 1, shutdownHits.count == 1, sessionCount == 2, active == nil,
+        guard hits.count == 3, ocrHits.count == 1, sessionCount == 2, active == nil,
               textHit?.body == "selftestneedle full body\nSecond line for copying.",
               text.destination.title == "Demo Heading", image.destination.kind == .inbox,
               let asset = imageHit?.assetPath else { throw SelfTestFailure("Pipeline verification failed") }
@@ -111,10 +126,13 @@ extension AppController {
         guard !representations.tiff.isEmpty, representations.png == png, let thumbnail,
               max(thumbnail.width, thumbnail.height) == 72 else { throw SelfTestFailure("Image search representations failed") }
         guard let textHit, let imageHit else { throw SelfTestFailure("Fusion fixtures missing") }
-        let fused = SemanticIndexer.fuse(keyword: [textHit], semantic: SemanticHits(text: [shutdownHits[0], textHit], images: [imageHit]))
+        guard let otherTextHit = hits.first(where: { $0.captureID != text.captureID }) else {
+            throw SelfTestFailure("Fusion fixtures missing a second text capture")
+        }
+        let fused = SemanticIndexer.fuse(keyword: [textHit], semantic: SemanticHits(text: [otherTextHit, textHit], images: [imageHit]))
         guard fused.count == 3, fused.first?.captureID == text.captureID,
               Set(fused.map(\.embeddingKey)).count == 3,
-              SemanticIndexer.fuse(keyword: [textHit], semantic: SemanticHits(text: [shutdownHits[0]], images: [imageHit]), limit: 2).count == 2 else {
+              SemanticIndexer.fuse(keyword: [textHit], semantic: SemanticHits(text: [otherTextHit], images: [imageHit]), limit: 2).count == 2 else {
             throw SelfTestFailure("Three-list RRF failed")
         }
         var semanticStatus = "skipped (models not installed)"
@@ -151,6 +169,17 @@ extension AppController {
             guard try !vectors.keys().contains("Deleted.md#loose-0") else { throw SelfTestFailure("Stale vector was retained") }
             semanticStatus = "passed (no keyword overlap; best match found)"
         }
+
+        // Verify accepted termination drains a still-pending default commit only
+        // after the semantic checks, because termination permanently closes the
+        // semantic helper client.
+        await stage(CapturePipeline.selection(text: "shutdownneedle pending capture", context: context))
+        _ = await beginTermination().value
+        guard !pipeline.monitor.isRunning else { throw SelfTestFailure("Vault watcher remained running on termination") }
+        let shutdownHits = try await pipeline.index.search("shutdownneedle")
+        let stats = try await pipeline.index.sync()
+        guard shutdownHits.count == 1 else { throw SelfTestFailure("Shutdown drain did not save its pending capture") }
+
         let slowOCRSeconds = try await checkFeedback(png: png, context: context)
         try await checkRecovery(png: png, context: context)
         try await checkCorruptJournal(png: png, context: context)
@@ -171,6 +200,7 @@ extension AppController {
             "partialAssetRepaired": true,
             "semanticSearch": semanticStatus, "semanticImageVectors": semanticImageVectors,
             "hybridFusionVerified": true,
+            "semanticRetryRecoveryVerified": true,
             "coalescedOwnExternalEditVerified": true,
             "watcherExternalEditVerified": true, "watcherExternalEditSeconds": externalSeconds,
             "watcherStoppedOnTermination": true,
@@ -305,6 +335,62 @@ extension AppController {
               NotePinStore(stateDirectory: pinState).paths() == ["d.md"] else { throw SelfTestFailure("Pin store did not recover from a corrupt file") }
         _ = await controller.beginTermination().value
         return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    }
+
+    private func checkSemanticRetryRecovery() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("focusnotes-semantic-retry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let vault = Vault(root: base.appendingPathComponent("Vault", isDirectory: true))
+        try vault.prepare()
+        let state = base.appendingPathComponent("State", isDirectory: true)
+        let index = try SearchIndex(vault: vault, databaseURL: state.appendingPathComponent("index.sqlite"), calendar: pipeline.calendar)
+
+        let cancellationProbe = SemanticRetryProbe()
+        let cancellableRetry = SemanticIndexer(index: index, vault: vault,
+                                               stateDirectory: state.appendingPathComponent("Cancel"),
+                                               modelsDirectory: state.appendingPathComponent("CancelModels", isDirectory: true),
+                                               retryDelaysForTesting: [.milliseconds(250)],
+                                               testingReconciler: { try await cancellationProbe.reconcile() })
+        await cancellableRetry.flush()
+        guard await cancellationProbe.count() == 1 else { throw SelfTestFailure("Semantic retry cancellation probe did not fail once") }
+        await cancellableRetry.setEnabled(false)
+        try await Task.sleep(for: .milliseconds(600))
+        guard await cancellationProbe.count() == 1 else { throw SelfTestFailure("Disabling semantic indexing did not cancel its pending retry") }
+        await cancellableRetry.stop()
+
+        let shutdownProbe = SemanticRetryProbe()
+        let stoppedRetry = SemanticIndexer(index: index, vault: vault,
+                                           stateDirectory: state.appendingPathComponent("Shutdown"),
+                                           modelsDirectory: state.appendingPathComponent("ShutdownModels", isDirectory: true),
+                                           retryDelaysForTesting: [.milliseconds(100)],
+                                           testingReconciler: { try await shutdownProbe.reconcile() })
+        await stoppedRetry.flush()
+        guard await shutdownProbe.count() == 1 else { throw SelfTestFailure("Semantic shutdown probe did not fail once") }
+        await stoppedRetry.stop()
+        await stoppedRetry.schedule()
+        await stoppedRetry.setEnabled(true)
+        try await Task.sleep(for: .milliseconds(200))
+        guard await shutdownProbe.count() == 1 else { throw SelfTestFailure("Stopped semantic indexing accepted a late schedule or retry") }
+
+        let probe = SemanticRetryProbe()
+        let semantic = SemanticIndexer(index: index, vault: vault, stateDirectory: state,
+                                       modelsDirectory: state.appendingPathComponent("models", isDirectory: true),
+                                       retryDelaysForTesting: [.milliseconds(50)],
+                                       testingReconciler: { try await probe.reconcile() })
+        await semantic.flush()
+        guard await probe.count() == 1 else { throw SelfTestFailure("Semantic retry probe did not start exactly one reconciliation") }
+        let retryStart = ContinuousClock.now
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await probe.count() < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard await probe.count() == 2,
+              retryStart.duration(to: .now) >= .milliseconds(30) else {
+            throw SelfTestFailure("Failed semantic reconciliation did not retry automatically after backoff")
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        guard await probe.count() == 2 else { throw SelfTestFailure("Successful semantic retry continued to spin") }
+        await semantic.stop()
     }
 
     /// Isolated quick-note persistence assertions also run independently of the host's OCR service.
@@ -673,6 +759,28 @@ private final class SelfTestLatch {
         await withCheckedContinuation { ready = $0 }
     }
     func release() { held?.resume(); held = nil }
+}
+
+private actor SelfTestCompletion {
+    private var finished = false
+    func finish() { finished = true }
+    func isFinished() -> Bool { finished }
+}
+
+private actor SemanticRetryProbe {
+    private var attempts = 0
+    private let failingAttempts: Set<Int>
+
+    init(failingAttempts: Set<Int> = [1]) { self.failingAttempts = failingAttempts }
+
+    func reconcile() throws {
+        attempts += 1
+        if failingAttempts.contains(attempts) { throw ProbeFailure.expectedFailure }
+    }
+
+    func count() -> Int { attempts }
+
+    private enum ProbeFailure: Error { case expectedFailure }
 }
 
 private func selfTestJournalJobs(_ journal: CaptureJournal) async throws -> [CaptureJob] {

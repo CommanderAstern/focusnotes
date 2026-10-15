@@ -397,6 +397,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let actions = actionTail
         let startup = startupReplayTask
         let drain = Task { [self] in
+            await pipeline.semantic.stop()
             _ = await startup?.value
             await acquisition?.value
             await processingTail?.value
