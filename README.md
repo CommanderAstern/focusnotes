@@ -64,9 +64,11 @@ cd focusnotes
 ./scripts/run-app.sh
 ```
 
-`run-app.sh` builds `build/focusnotes.app`, quits any running copy and opens the new one. A tray icon appears in the
-menu bar; there is no Dock icon. Use `./scripts/run-app.sh release` for an optimised build. To build without
-launching, run `./scripts/build-app.sh`.
+`run-app.sh` builds the app, quits any running copy, installs it to `/Applications/focusnotes.app` (or
+`~/Applications` if `/Applications` is not writable) and opens it. It then deletes the build artifacts (`.build` and
+the staged bundle), which can take several GB; set `KEEP_BUILD=1` to keep them for faster incremental rebuilds. A tray
+icon appears in the menu bar; there is no Dock icon. Use `./scripts/run-app.sh release` for an optimised build. To
+build without installing or launching, run `./scripts/build-app.sh`.
 
 ### Grant permissions
 

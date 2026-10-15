@@ -16,6 +16,25 @@ APPNAME_LOWER="$(printf '%s' "$APPNAME" | LC_ALL=C tr '[:upper:]' '[:lower:]' | 
 BUNDLE_ID="$BUNDLE_PREFIX.$APPNAME_LOWER"
 BUNDLE_PATH="$ROOT_DIR/build/$APPNAME.app"
 
+# Install to /Applications, or ~/Applications when /Applications is not writable.
+INSTALL_DIR="/Applications"
+if [[ ! -w "$INSTALL_DIR" ]]; then
+    INSTALL_DIR="$HOME/Applications"
+    mkdir -p "$INSTALL_DIR"
+fi
+INSTALL_PATH="$INSTALL_DIR/$APPNAME.app"
+
 pkill -x "$APPNAME" 2>/dev/null || true
-open "$BUNDLE_PATH"
+rm -rf "$INSTALL_PATH"
+ditto "$BUNDLE_PATH" "$INSTALL_PATH"
+open "$INSTALL_PATH"
+printf 'Installed %s\n' "$INSTALL_PATH"
+
+# SwiftPM's .build grows to several GB; drop it and the staged bundle once installed.
+# KEEP_BUILD=1 keeps them for faster incremental rebuilds.
+if [[ "${KEEP_BUILD:-0}" != "1" ]]; then
+    rm -rf "$ROOT_DIR/.build" "$BUNDLE_PATH"
+    printf 'Removed build artifacts (set KEEP_BUILD=1 to keep them)\n'
+fi
+
 printf "Tail logs with: log stream --predicate 'subsystem == \"%s\"'\n" "$BUNDLE_ID"
