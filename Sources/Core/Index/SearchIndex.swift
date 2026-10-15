@@ -119,7 +119,11 @@ public actor SearchIndex {
         return true
     }
 
-    public func assetsMissingText() throws -> [String] {
+    /// Returns assets that need OCR. Pass `[]` after a note-only edit to avoid
+    /// hashing unchanged files; pass changed watcher paths to validate those
+    /// assets even when size and modification time did not change. `nil` checks
+    /// every content digest and is used for startup/full recovery scans.
+    public func assetsMissingText(recheckingAssetPaths: Set<String>? = nil) throws -> [String] {
         let rows = try database.prepare("""
             SELECT DISTINCT b.asset_path, i.mtime, i.size, i.fingerprint FROM blocks b
             LEFT JOIN image_text i ON i.asset_path = b.asset_path
@@ -131,7 +135,7 @@ public actor SearchIndex {
             let current = try? Self.fingerprint(assetURL(path))
             if rows.isNull(1) || current == nil || current != Fingerprint(mtime: rows.double(1), size: rows.int(2)) {
                 missing.append(path)
-            } else {
+            } else if recheckingAssetPaths.map({ $0.contains(path) }) ?? true {
                 let digest = try? Self.imageFingerprint(Data(contentsOf: assetURL(path)))
                 if digest == nil || digest != rows.text(3) { missing.append(path) }
             }

@@ -335,10 +335,15 @@ private func checkOCRFingerprintRace() async throws {
     try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
     let stored = try await index.setImageText(assetPath: path, text: "staleocr", fingerprint: originalFingerprint)
     let staleHits = try await index.search("staleocr")
+    let noteOnlyScan = try await index.assetsMissingText(recheckingAssetPaths: [])
+    let changedPathScan = try await index.assetsMissingText(recheckingAssetPaths: [path])
     let missing = try await index.assetsMissingText()
-    try require(!stored && staleHits.isEmpty && missing == [path], "OCR of image A must not be accepted for image B with identical metadata")
+    try require(!stored && staleHits.isEmpty && noteOnlyScan.isEmpty && changedPathScan == [path] && missing == [path],
+                "Same-metadata replacement must be checked for changed paths and full scans, while note-only scans skip its digest")
     let replacementStored = try await index.setImageText(assetPath: path, text: "replacementocr", fingerprint: SearchIndex.imageFingerprint(replacement))
     let currentHits = try await index.search("replacementocr")
+    let currentChangedPathScan = try await index.assetsMissingText(recheckingAssetPaths: [path])
     let currentMissing = try await index.assetsMissingText()
-    try require(replacementStored && currentHits.count == 1 && currentMissing.isEmpty, "next OCR pass should store only image B's text")
+    try require(replacementStored && currentHits.count == 1 && currentChangedPathScan.isEmpty && currentMissing.isEmpty,
+                "next OCR pass should store only image B's text")
 }

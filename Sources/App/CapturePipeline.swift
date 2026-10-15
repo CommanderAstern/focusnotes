@@ -51,9 +51,12 @@ struct CapturePipeline: Sendable {
         let semantic = SemanticIndexer(index: index, vault: vault, stateDirectory: stateDirectory,
                                        modelsDirectory: modelsDirectory ?? stateDirectory.appendingPathComponent("models", isDirectory: true))
         let logger = Logger(subsystem: AppInfo.bundleIdentifier, category: "pipeline")
-        let monitor = VaultMonitor(vault: vault) { notes, assets in
-            if notes { await Self.syncIndex(index: index, semantic: semantic, logger: logger) }
-            if assets, !Task.isCancelled { await Self.backfillAssets(vault: vault, index: index, semantic: semantic, logger: logger) }
+        let monitor = VaultMonitor(vault: vault) { request in
+            if request.notes { await Self.syncIndex(index: index, semantic: semantic, logger: logger) }
+            if request.assets, !Task.isCancelled {
+                await Self.backfillAssets(vault: vault, index: index, semantic: semantic,
+                                          recheckingAssetPaths: request.recheckingAssetPaths, logger: logger)
+            }
         }
         let sessions = SessionStore(stateDirectory: stateDirectory, vault: vault, calendar: calendar, now: Date.init)
         let writer = NoteWriter(vault: vault, calendar: calendar)
@@ -175,9 +178,10 @@ struct CapturePipeline: Sendable {
 
     func backfill() async { await monitor.backfill() }
 
-    private static func backfillAssets(vault: Vault, index: SearchIndex, semantic: SemanticIndexer, logger: Logger) async {
+    private static func backfillAssets(vault: Vault, index: SearchIndex, semantic: SemanticIndexer,
+                                      recheckingAssetPaths: Set<String>?, logger: Logger) async {
         do {
-            for path in try await index.assetsMissingText() {
+            for path in try await index.assetsMissingText(recheckingAssetPaths: recheckingAssetPaths) {
                 guard !Task.isCancelled else { return }
                 do {
                     let data = try Data(contentsOf: assetURL(path, vault: vault))
