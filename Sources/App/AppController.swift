@@ -16,6 +16,7 @@ enum AppErrorLog {
 final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     private var controller: AppController?
     private var terminationRequested = false
+    private let relaunchLifecycle = RelaunchLifecycle(launch: { ApplicationDelegate.launchRelaunchHelper() })
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task {
@@ -27,6 +28,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
                 let state = home.appendingPathComponent("Library/Application Support").appendingPathComponent(AppInfo.bundleIdentifier, isDirectory: true)
                 let pipeline = try await CapturePipeline.open(vaultRoot: root, stateDirectory: state, calendar: .current)
                 let controller = AppController(pipeline: pipeline)
+                connectRelaunchHandler(to: controller)
                 self.controller = controller
                 await controller.start()
             } catch {
@@ -37,6 +39,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        relaunchLifecycle.applicationWillTerminate()
+    }
+
+    private func connectRelaunchHandler(to controller: AppController) {
+        controller.onRelaunchRequested = { [weak self] in self?.requestRelaunch() }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let controller else { return .terminateNow }
         guard !terminationRequested else { return .terminateLater }
@@ -44,10 +54,56 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         let shutdown = controller.beginTermination()
         Task {
             let shouldTerminate = await shutdown.value
-            if !shouldTerminate { terminationRequested = false }
+            if !shouldTerminate {
+                relaunchLifecycle.terminationWasVetoed()
+                terminationRequested = false
+            }
             sender.reply(toApplicationShouldTerminate: shouldTerminate)
         }
         return .terminateLater
+    }
+
+    private func requestRelaunch() {
+        relaunchLifecycle.request()
+        NSApp.terminate(nil)
+    }
+
+    private static func launchRelaunchHelper() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "parent_pid=\"$1\"; app_path=\"$2\"; while /bin/kill -0 \"$parent_pid\" 2>/dev/null; do /bin/sleep 0.1; done; exec /usr/bin/open -n \"$app_path\"",
+            "relaunch-helper",
+            String(ProcessInfo.processInfo.processIdentifier),
+            Bundle.main.bundlePath,
+        ]
+        try? process.run()
+    }
+}
+
+/// Holds a relaunch request until AppKit confirms the app is actually terminating.
+@MainActor
+final class RelaunchLifecycle {
+    private let launch: @MainActor () -> Void
+    private var isRequested = false
+
+    init(launch: @escaping @MainActor () -> Void) {
+        self.launch = launch
+    }
+
+    func request() {
+        isRequested = true
+    }
+
+    func terminationWasVetoed() {
+        isRequested = false
+    }
+
+    func applicationWillTerminate() {
+        guard isRequested else { return }
+        isRequested = false
+        launch()
     }
 }
 
@@ -101,17 +157,22 @@ final class AppController: NSObject, NSMenuDelegate {
     private var sessionItem: NSMenuItem?
     private var accessibilityItem: NSMenuItem?
     private var screenRecordingItem: NSMenuItem?
-    private var semanticItem: NSMenuItem?
+    private var semanticModels: SemanticModelsMenu?
     private var powerMonitor: PowerMonitor?
     private var menuTracking = false
     private var menuAction: (@MainActor () -> Void)?
     private var requestedScreenCapture = false
+    private let permissionGuide = PermissionGuide()
+    private var appUpdater: AppUpdater?
+    var onRelaunchRequested: (() -> Void)?
 
     init(pipeline: CapturePipeline, presentsUI: Bool = true, onToast: ((Toast) -> Void)? = nil) {
         self.pipeline = pipeline
         self.presentsUI = presentsUI
         self.onToast = onToast
         super.init()
+        permissionGuide.onGranted = { [weak self] _ in self?.refreshStatus() }
+        permissionGuide.onRelaunch = { [weak self] in self?.onRelaunchRequested?() }
         toast.onExpire = { [weak self] in
             guard let self, self.pendingToastID == self.pending?.id else { return }
             _ = self.commitPending()
@@ -134,7 +195,12 @@ final class AppController: NSObject, NSMenuDelegate {
         if presentsUI {
             registerHotkeys()
             installStatusItem()
-            if !CapturePermissions.accessibilityTrusted { CapturePermissions.promptForAccessibility() }
+            // The guide replaces the system AX prompt, and only the first launch ever shows it.
+            let guideKey = "didShowAccessibilityGuide"
+            if !CapturePermissions.accessibilityTrusted, !UserDefaults.standard.bool(forKey: guideKey) {
+                UserDefaults.standard.set(true, forKey: guideKey)
+                permissionGuide.show(for: .accessibility)
+            }
         }
         let indexing = Task.detached(priority: .utility) {
             // Observe first: events received during the initial scan queue another pass.
@@ -222,7 +288,7 @@ final class AppController: NSObject, NSMenuDelegate {
                     case .permissionNeeded:
                         if !requestedScreenCapture, !isTerminating {
                             requestedScreenCapture = true
-                            CapturePermissions.requestScreenCapture()
+                            permissionGuide.show(for: .screenCapture)
                         }
                         showToast(Toast(style: .warning, title: "Allow Screen Recording to capture areas",
                                                    subtitle: "Open the menu bar icon → Permissions"))
@@ -386,6 +452,7 @@ final class AppController: NSObject, NSMenuDelegate {
         guard editor?.isVisible != true else { return Task { false } }
         let deadline = ContinuousClock.now.advanced(by: timeout)
         isTerminating = true
+        permissionGuide.dismiss()
         startupIndexTask?.cancel()
         pipeline.monitor.stop()
         powerMonitor?.stop()
@@ -404,6 +471,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let acquisition = acquisitionTask
         let actions = actionTail
         let startup = startupReplayTask
+        semanticModels?.cancelDownload()
         let drain = Task { [self] in
             await pipeline.semantic.stop()
             _ = await startup?.value
@@ -973,6 +1041,14 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(retry)
         menu.addItem(.separator())
         menu.addItem(menuItem("Open Notes Folder", hotkey: .openLibrary, action: #selector(menuOpenFolder)))
+        let models = SemanticModelsMenu(
+            semantic: pipeline.semantic, target: self,
+            download: #selector(menuSemanticModels), remove: #selector(menuRemoveSemanticModels),
+            changed: { [weak self] in self?.refreshStatus() },
+            failed: { [weak self] error, title in self?.report(error, title: title) },
+            succeeded: { [weak self] in self?.showToast(Toast(style: .success, title: "Semantic search is ready")) })
+        semanticModels = models
+        menu.addItem(models.item)
         let permissions = NSMenuItem(title: "Permissions", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         submenu.delegate = self
@@ -982,12 +1058,11 @@ final class AppController: NSObject, NSMenuDelegate {
         screenRecordingItem = screen
         submenu.addItem(accessibility)
         submenu.addItem(screen)
-        let semantic = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        semantic.isEnabled = false
-        semanticItem = semantic
-        submenu.addItem(semantic)
         permissions.submenu = submenu
         menu.addItem(permissions)
+        let updater = AppUpdater()
+        appUpdater = updater
+        if let updateItem = updater.menuItem { menu.addItem(updateItem) }
         menu.addItem(.separator())
         menu.addItem(menuItem("Quit \(AppInfo.name)", action: #selector(menuQuit)))
         status.menu = menu
@@ -1049,11 +1124,15 @@ final class AppController: NSObject, NSMenuDelegate {
             setMenuTitle(sessionItem, title: activeSession.map { "End Session “\($0.name)”" } ?? "Start Session…", hotkey: .toggleSession)
         }
         refreshShortcutStatus()
-        accessibilityItem?.state = CapturePermissions.accessibilityTrusted ? .on : .off
-        screenRecordingItem?.state = CapturePermissions.screenCaptureAllowed ? .on : .off
+        let axGranted = CapturePermissions.accessibilityTrusted
+        accessibilityItem?.title = axGranted ? "Accessibility" : "Accessibility…"
+        accessibilityItem?.state = axGranted ? .on : .off
+        let screenGranted = CapturePermissions.screenCaptureAllowed
+        screenRecordingItem?.title = screenGranted ? "Screen Recording" : "Screen Recording…"
+        screenRecordingItem?.state = screenGranted ? .on : .off
         let semantic = pipeline.semantic
         let enabled = SemanticIndexer.modelsInstalled(in: semantic.modelsDirectory)
-        semanticItem?.title = enabled ? "Semantic search: On" : "Semantic search: Off (models not installed)"
+        semanticModels?.refresh(installed: enabled)
         Task.detached(priority: .utility) { await semantic.setEnabled(enabled) }
         if enabled, !isTerminating, powerMonitor == nil {
             powerMonitor = PowerMonitor { Task { await semantic.schedule() } }
@@ -1097,11 +1176,23 @@ final class AppController: NSObject, NSMenuDelegate {
     @objc private func menuRetryShortcuts() { afterMenu { [weak self] in self?.registerHotkeys() } }
     @objc private func menuSession() { afterMenu { [weak self] in self?.toggleSession() } }
     @objc private func menuOpenFolder() { afterMenu { [weak self] in self?.openNotesFolder() } }
+    @objc private func menuSemanticModels() { afterMenu { [weak self] in self?.semanticModels?.activate() } }
+    @objc private func menuRemoveSemanticModels() { afterMenu { [weak self] in self?.semanticModels?.confirmRemove() } }
     @objc private func menuAccessibility() {
-        afterMenu { if !CapturePermissions.accessibilityTrusted { CapturePermissions.openSettings(for: .accessibility) } }
+        afterMenu { [weak self] in self?.handlePermissionMenu(.accessibility) }
     }
     @objc private func menuScreenRecording() {
-        afterMenu { if !CapturePermissions.screenCaptureAllowed { CapturePermissions.openSettings(for: .screenCapture) } }
+        afterMenu { [weak self] in self?.handlePermissionMenu(.screenCapture) }
+    }
+
+    /// Not granted: the guide walks the user through it. Granted: open the pane only, so the user can revoke.
+    private func handlePermissionMenu(_ permission: CapturePermission) {
+        let granted = permission == .accessibility ? CapturePermissions.accessibilityTrusted : CapturePermissions.screenCaptureAllowed
+        if granted {
+            CapturePermissions.openSettings(for: permission)
+        } else {
+            permissionGuide.show(for: permission)
+        }
     }
     /// A run-loop perform, not a main-queue block: terminate's terminate-later wait must leave the main queue free for the shutdown tasks.
     @objc private func menuQuit() { NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0) }

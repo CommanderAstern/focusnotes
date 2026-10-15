@@ -1,3 +1,4 @@
+import Darwin
 import Core
 import SQLite3
 import Foundation
@@ -202,7 +203,44 @@ func checkSearchIndex() async throws {
     try await checkIndexRankingAndSharedAssets()
     try await checkOCRFingerprintRace()
     try await checkIndexRejectsLinkedManagedReads()
+    try await checkIndexSkipsUnreadableNote()
     print("SearchIndex checks passed.")
+}
+
+private func checkIndexSkipsUnreadableNote() async throws {
+    // Root can read mode-000 files, so this filesystem behavior check only applies
+    // to the normal non-root test account used by local and CI runs.
+    guard getuid() != 0 else { return }
+
+    let base = try checkMakeDirectory("index-unreadable-note")
+    let vault = Vault(root: base.appendingPathComponent("Vault"))
+    let note = vault.root.appendingPathComponent("Unreadable.md")
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: note.path)
+        checkRemoveDirectory(base)
+    }
+
+    try vault.prepare()
+    try checkWrite("# Unreadable\n\nunreadablecandidate\n", to: note)
+    let index = try SearchIndex(vault: vault, databaseURL: base.appendingPathComponent("index.sqlite"), calendar: checkCalendar())
+    let initial = try await index.sync()
+    try require(initial.added == 2 && initial.removed == 0, "unreadable-note fixture should initially index Inbox and its note")
+    let initialHits = try await index.search("unreadablecandidate")
+    try require(initialHits.count == 1, "initially readable note should be searchable")
+
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: note.path)
+    let unreadable = try await index.sync()
+    try require(unreadable.removed == 1 && unreadable.unchanged == 1,
+                "unreadable note should be skipped like listNotes() and removed from the cache")
+    let unreadableHits = try await index.search("unreadablecandidate")
+    try require(unreadableHits.isEmpty, "a note skipped for unreadability should not remain searchable")
+
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: note.path)
+    let restored = try await index.sync()
+    try require(restored.added == 1 && restored.unchanged == 1 && restored.removed == 0,
+                "a readable note should be indexed again after permissions are restored")
+    let restoredHits = try await index.search("unreadablecandidate")
+    try require(restoredHits.count == 1, "restored note should become searchable again")
 }
 
 private func checkIndexOperation<T>(_ label: String, operation: () async throws -> T) async throws -> T {
@@ -297,9 +335,16 @@ func checkSearchIndexPerformance() async throws {
     var start = clock.now
     let coldStats = try await index.sync()
     let cold = indexSeconds(start.duration(to: clock.now))
-    start = clock.now
-    let warmStats = try await index.sync()
-    let warm = indexSeconds(start.duration(to: clock.now))
+    var warmSamples: [Double] = []
+    for _ in 0..<5 {
+        start = clock.now
+        let warmStats = try await index.sync()
+        warmSamples.append(indexSeconds(start.duration(to: clock.now)))
+        try require(warmStats.added == 0 && warmStats.updated == 0 && warmStats.removed == 0 && warmStats.unchanged == 2_000,
+                    "repeated no-change sync should leave all 2,000 notes unchanged")
+    }
+    let sortedWarmSamples = warmSamples.sorted()
+    let warm = sortedWarmSamples[sortedWarmSamples.count / 2]
     var searches: [Double] = []
     for _ in 0..<20 {
         start = clock.now
@@ -309,10 +354,11 @@ func checkSearchIndexPerformance() async throws {
     }
     searches.sort()
     let median = (searches[9] + searches[10]) / 2
-    print(String(format: "Index performance (2,000 notes × 10 captures): cold sync %.3f s; no-change sync %.1f ms; search median %.2f ms.", cold, warm * 1_000, median * 1_000))
-    try require(coldStats.added == 2_000 && warmStats.unchanged == 2_000, "performance fixture should index all notes and leave them unchanged")
+    let warmSampleText = warmSamples.map { String(format: "%.1f", $0 * 1_000) }.joined(separator: ", ")
+    print(String(format: "Index performance (2,000 notes × 10 captures): cold sync %.3f s; no-change sync samples [%@] ms, median %.1f ms; search median %.2f ms.", cold, warmSampleText, warm * 1_000, median * 1_000))
+    try require(coldStats.added == 2_000, "performance fixture should index all notes")
     try require(cold < 6, "cold sync exceeded 6 seconds: \(cold)")
-    try require(warm < 0.4, "no-change sync exceeded 400 milliseconds: \(warm)")
+    try require(warm < 0.4, "no-change sync median exceeded 400 milliseconds: \(warm)")
     try require(median < 0.04, "search median exceeded 40 milliseconds: \(median)")
 }
 

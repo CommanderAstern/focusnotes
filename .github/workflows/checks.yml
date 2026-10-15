@@ -1,0 +1,93 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # xcode-27 runner: Xcode 27 (Swift 6.4) is the default toolchain.
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 27 (Swift 6.4)
+        run: sudo xcode-select -s /Applications/Xcode_27.app
+
+      - name: Print toolchain
+        run: |
+          swift --version
+          sw_vers
+
+      - name: Require Swift 6.4 or newer
+        run: |
+          set -euo pipefail
+          version="$(swift --version | sed -n 's/.*Apple Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)"
+          [[ -n "$version" ]] || { echo "Could not read the Swift version" >&2; exit 1; }
+          if [[ "$(printf '%s\n' 6.4 "$version" | sort -V | head -n 1)" != "6.4" ]]; then
+            echo "Swift 6.4+ required; got $version" >&2
+            exit 1
+          fi
+          echo "Swift $version"
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-
+
+      # Known flaky: `swift run OverlayGallery --check` (run inside release.sh --adhoc) can fail
+      # intermittently. If this step fails there, re-run the job; do not special-case it here.
+      - name: Checks and ad-hoc DMG
+        env:
+          # Vision OCR does not work in GitHub's macOS VMs; CaptureChecks then skips only OCR.
+          CAPTURE_CHECKS_ALLOW_OCR_SKIP: "1"
+        run: scripts/release.sh --adhoc
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: focusnotes-adhoc-dmg
+          path: dist/
+          retention-days: 14
+
+  smoke-macos-15:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - name: Download ad-hoc DMG
+        uses: actions/download-artifact@v8
+        with:
+          name: focusnotes-adhoc-dmg
+          path: dist
+
+      - name: Mount, verify signature and self-test on macOS 15
+        timeout-minutes: 2
+        env:
+          MNT: ${{ runner.temp }}/mnt
+          STATE: ${{ runner.temp }}/selftest
+        run: |
+          set -euo pipefail
+          mkdir -p "$MNT" "$STATE"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT" dist/*.dmg
+          app="$MNT/focusnotes.app"
+          codesign --verify --strict --verbose=2 "$app"
+          # Self-test runs without UI. Exits non-zero on failure. Timeout is enforced by timeout-minutes (2 min).
+          "$app/Contents/MacOS/focusnotes" --self-test "$STATE"
+
+      - name: Detach DMG
+        if: always()
+        env:
+          MNT: ${{ runner.temp }}/mnt
+        run: |
+          hdiutil detach "$MNT" -force || true
