@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import EmbedKit
+@_spi(Testing) import EmbedKit
 import SQLite3
 
 private struct FixtureConfiguration: Codable { var mode: String }
@@ -247,6 +247,48 @@ func runRegressionChecks(_ checks: inout Checks, root: URL) async throws {
     checks.require(try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count == 1,
                    "query cancellation drains framing without restarting a healthy helper")
     await client.shutdown()
+
+    let restartSpawnCount = try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count
+    _ = try await client.ping()
+    checks.require(try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count == restartSpawnCount + 1,
+                   "reversible shutdown still permits a later helper restart")
+    await client.shutdown()
+
+    baseline = try requests(in: directory).count
+    let closeActive = Task { () -> Bool in
+        do { _ = try await client.embedDocuments(["hold-close"]) ; return true }
+        catch { return false }
+    }
+    try await waitUntil { try requests(in: directory).count > baseline }
+    let closeQueued = Task { () -> Bool in
+        do { _ = try await client.embedQuery("must-not-start-after-close"); return true }
+        catch { return false }
+    }
+    let closeDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while await client.pendingRequestCountForTesting() < 2, ContinuousClock.now < closeDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard await client.pendingRequestCountForTesting() == 2 else {
+        throw EmbeddingError.invalid("Close fixture did not queue both requests")
+    }
+    let closeSpawnCount = try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count
+    await client.close()
+    let activeSucceeded = await closeActive.value
+    let queuedSucceeded = await closeQueued.value
+    let closeRequests = try requests(in: directory).dropFirst(baseline).compactMap { $0.text ?? $0.texts?.first }
+    let closeSpawnCountAfter = try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count
+    let closePendingCount = await client.pendingRequestCountForTesting()
+    checks.require(!activeSucceeded && !queuedSucceeded && closeRequests == ["hold-close"] &&
+                   closeSpawnCountAfter == closeSpawnCount && closePendingCount == 0,
+                   "permanent close cancels active and queued work without starting another helper")
+    do {
+        _ = try await client.ping()
+        checks.require(false, "closed client rejects new work")
+    } catch {
+        checks.require(String(describing: error).contains("closed"), "closed client rejects new work")
+    }
+    checks.require(try String(contentsOf: directory.appendingPathComponent("spawns"), encoding: .utf8).split(separator: "\n").count == closeSpawnCountAfter,
+                   "closed client cannot respawn its helper")
 
     let (errorExecutable, errorDirectory) = try makeFixture(in: root, mode: "error")
     let errorClient = try EmbedClient(helperExecutable: errorExecutable, modelsDirectory: errorDirectory)

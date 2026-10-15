@@ -55,6 +55,14 @@ public final class EmbedClient: Sendable {
     public func processID() async -> Int32? { await transport.processID() }
     public func shutdown() async { await transport.shutdown() }
 
+    /// Permanently rejects new work and stops this client's helper. Unlike
+    /// `shutdown()`, a closed client cannot be restarted.
+    public func close() async { await transport.close() }
+
+    @_spi(Testing) public func pendingRequestCountForTesting() async -> Int {
+        await transport.pendingRequestCount()
+    }
+
     private func perform(_ request: EmbedRequest) async throws -> [[Float]] {
         try Task.checkCancellation()
         let response = try await transport.send(request)
@@ -74,6 +82,9 @@ private final class HelperTransport: @unchecked Sendable {
     private let directory: URL
     private let idle: Double
     private let timeout: Double
+    private let lifecycleLock = NSLock()
+    private var permanentlyClosed = false
+    private var requests: [ObjectIdentifier: TransportCancellation] = [:]
     // Accessed only on queue (or in deinit, once queue's retaining calls finish).
     private var process: Process?
     private var input: FileHandle?
@@ -87,44 +98,68 @@ private final class HelperTransport: @unchecked Sendable {
     }
     deinit { stop() }
 
+    private func release(_ cancellation: TransportCancellation) {
+        _ = lifecycleLock.withLock { requests.removeValue(forKey: ObjectIdentifier(cancellation)) }
+    }
+
+    private func ensureOpen(_ cancellation: TransportCancellation) throws {
+        let isClosed = lifecycleLock.withLock { permanentlyClosed }
+        guard !isClosed else { throw CancellationError() }
+        try cancellation.check()
+    }
+
+    private func ensureTransportOpen(_ cancellation: TransportCancellation) throws {
+        let isClosed = lifecycleLock.withLock { permanentlyClosed }
+        guard !isClosed else { throw CancellationError() }
+        try cancellation.checkAbort()
+    }
+
     func send(_ request: EmbedRequest) async throws -> EmbedResponse {
         let cancellation = TransportCancellation()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                queue.async { [self] in
-                    do {
-                        // Embedding requests are pure, so retry once if the idle
-                        // deadline races a write or the helper dies unexpectedly.
-                        var response: EmbedResponse?
-                        for attempt in 0..<2 {
-                            try cancellation.check()
-                            try checkBackoff()
-                            do {
-                                response = try exchange(request, cancellation: cancellation)
-                                break
-                            } catch is CancellationError { throw CancellationError() }
-                            catch {
-                                recordFailure()
-                                stop()
-                                try cancellation.check()
-                                if attempt == 1 { throw error }
+                let accepted = lifecycleLock.withLock { () -> Bool in
+                    guard !permanentlyClosed else { return false }
+                    requests[ObjectIdentifier(cancellation)] = cancellation
+                    queue.async { [self] in
+                        defer { release(cancellation) }
+                        do {
+                            try ensureOpen(cancellation)
+                            // Embedding requests are pure, so retry once if the idle
+                            // deadline races a write or the helper dies unexpectedly.
+                            var response: EmbedResponse?
+                            for attempt in 0..<2 {
+                                try ensureOpen(cancellation)
+                                try checkBackoff()
+                                do {
+                                    response = try exchange(request, cancellation: cancellation)
+                                    break
+                                } catch is CancellationError { throw CancellationError() }
+                                catch {
+                                    recordFailure()
+                                    stop()
+                                    try ensureOpen(cancellation)
+                                    if attempt == 1 { throw error }
+                                }
                             }
-                        }
-                        guard let response else { throw EmbeddingError.transport("No response") }
-                        if let error = response.error {
-                            // Runtime/model failures also need a cooldown. A bad
-                            // install can fail every request without exiting.
-                            recordFailure()
-                            throw EmbeddingError.runtime(error)
-                        }
-                        // A ping never loads models, so it cannot prove recovery
-                        // from model errors. Actual inference resets the streak.
-                        if request.operation != "ping" { failures.removeAll(); retryAfter = 0 }
-                        try cancellation.check()
-                        continuation.resume(returning: response)
-                    } catch { continuation.resume(throwing: error) }
+                            guard let response else { throw EmbeddingError.transport("No response") }
+                            if let error = response.error {
+                                // Runtime/model failures also need a cooldown. A bad
+                                // install can fail every request without exiting.
+                                recordFailure()
+                                throw EmbeddingError.runtime(error)
+                            }
+                            // A ping never loads models, so it cannot prove recovery
+                            // from model errors. Actual inference resets the streak.
+                            if request.operation != "ping" { failures.removeAll(); retryAfter = 0 }
+                            try ensureOpen(cancellation)
+                            continuation.resume(returning: response)
+                        } catch { continuation.resume(throwing: error) }
+                    }
+                    return true
                 }
+                if !accepted { continuation.resume(throwing: EmbeddingError.transport("Embed client is closed")) }
             }
         } onCancel: { cancellation.cancel() }
     }
@@ -155,6 +190,21 @@ private final class HelperTransport: @unchecked Sendable {
         }
     }
 
+    func close() async {
+        let active = lifecycleLock.withLock { () -> [TransportCancellation] in
+            permanentlyClosed = true
+            return Array(requests.values)
+        }
+        active.forEach { $0.abort() }
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in stop(); continuation.resume() }
+        }
+    }
+
+    func pendingRequestCount() async -> Int {
+        lifecycleLock.withLock { requests.count }
+    }
+
     private func start() throws {
         if process?.isRunning == true { return }
         stop()
@@ -162,8 +212,11 @@ private final class HelperTransport: @unchecked Sendable {
         task.executableURL = executable
         task.arguments = ["--models", directory.path, "--idle-seconds", String(idle)]
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = FileHandle.standardError
-        try task.run()
-        process = task; input = stdin.fileHandleForWriting; output = stdout.fileHandleForReading
+        try lifecycleLock.withLock {
+            guard !permanentlyClosed else { throw CancellationError() }
+            try task.run()
+            process = task; input = stdin.fileHandleForWriting; output = stdout.fileHandleForReading
+        }
         // Foundation keeps parent copies of child pipe ends; close them so EOF
         // is observable even when the process exits between two requests.
         try? stdin.fileHandleForReading.close(); try? stdout.fileHandleForWriting.close()
@@ -192,8 +245,13 @@ private final class HelperTransport: @unchecked Sendable {
         process = nil; input = nil; output = nil; pending.removeAll(keepingCapacity: false)
     }
 
-    private func ready(_ fd: Int32, events: Int16, deadline: UInt64) throws {
+    private func ready(_ fd: Int32, events: Int16, deadline: UInt64,
+                       cancellation: TransportCancellation) throws {
         while true {
+            // Ordinary query cancellation still drains the in-flight response
+            // to preserve the request/response framing. Permanent close aborts
+            // the poll so its queued stop can terminate the helper promptly.
+            try ensureTransportOpen(cancellation)
             let now = DispatchTime.now().uptimeNanoseconds
             guard now < deadline else { throw EmbeddingError.transport("Helper request timed out") }
             var descriptor = pollfd(fd: fd, events: events, revents: 0)
@@ -202,7 +260,7 @@ private final class HelperTransport: @unchecked Sendable {
             if result < 0 && errno == EINTR { continue }
             if result < 0 { throw EmbeddingError.transport("Helper pipe poll failed") }
             if result == 0 { continue }
-            if descriptor.revents & events != 0 { return }
+            if descriptor.revents & events != 0 { try ensureTransportOpen(cancellation); return }
             throw EmbeddingError.transport("Helper closed its pipe")
         }
     }
@@ -217,7 +275,7 @@ private final class HelperTransport: @unchecked Sendable {
         try wire.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
-                try ready(writeFD, events: Int16(POLLOUT), deadline: deadline)
+                try ready(writeFD, events: Int16(POLLOUT), deadline: deadline, cancellation: cancellation)
                 let count = Darwin.write(writeFD, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
                 if count < 0 && [EAGAIN, EINTR].contains(errno) { continue }
                 guard count > 0 else { throw EmbeddingError.transport("Helper stdin write failed") }
@@ -225,7 +283,7 @@ private final class HelperTransport: @unchecked Sendable {
             }
         }
         while pending.firstIndex(of: 10) == nil {
-            try ready(readFD, events: Int16(POLLIN), deadline: deadline)
+            try ready(readFD, events: Int16(POLLIN), deadline: deadline, cancellation: cancellation)
             var bytes = [UInt8](repeating: 0, count: 16_384)
             let count = Darwin.read(readFD, &bytes, bytes.count)
             if count < 0 && [EAGAIN, EINTR].contains(errno) { continue }
@@ -246,8 +304,13 @@ private final class HelperTransport: @unchecked Sendable {
 private final class TransportCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
+    private var abortRequested = false
     func cancel() { lock.withLock { cancelled = true } }
+    func abort() { lock.withLock { cancelled = true; abortRequested = true } }
     func check() throws {
         if lock.withLock({ cancelled }) { throw CancellationError() }
+    }
+    func checkAbort() throws {
+        if lock.withLock({ abortRequested }) { throw CancellationError() }
     }
 }
