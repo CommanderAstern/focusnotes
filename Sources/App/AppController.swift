@@ -939,7 +939,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func installStatusItem() {
-        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = status
         status.button?.toolTip = AppInfo.name
         let menu = NSMenu()
@@ -1026,9 +1026,13 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshStatus() {
+        // Bundled template icons; the SF Symbol fallback covers unbundled `swift run` builds.
+        let resource = activeSession == nil ? "MenuBarIcon" : "MenuBarIcon-active"
         let symbol = activeSession == nil ? "tray.and.arrow.down" : "tray.and.arrow.down.fill"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: AppInfo.name)
+        let image = Bundle.main.url(forResource: resource, withExtension: "pdf").flatMap(NSImage.init(contentsOf:))
+            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: AppInfo.name)
         image?.isTemplate = true
+        image?.accessibilityDescription = AppInfo.name
         statusItem?.button?.image = image
         if let sessionItem {
             setMenuTitle(sessionItem, title: activeSession.map { "End Session “\($0.name)”" } ?? "Start Session…", hotkey: .toggleSession)
