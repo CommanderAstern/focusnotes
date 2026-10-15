@@ -106,12 +106,13 @@ public final class OverlayPanel: NSPanel, NSWindowDelegate {
         })
     }
 
-    public func dismiss(animated: Bool = true) {
-        guard !finished else { return }
-        guard closing || shouldDismiss?() != false else { return }
+    @discardableResult
+    public func dismiss(animated: Bool = true) -> Bool {
+        guard !finished else { return true }
+        guard closing || shouldDismiss?() != false else { return false }
         if closing {
             if !animated { finishDismissal() }
-            return
+            return true
         }
         closing = true
         onDismiss?()
@@ -119,7 +120,7 @@ public final class OverlayPanel: NSPanel, NSWindowDelegate {
         stopObserving()
         // Interactive panels relinquish keyboard focus before any close callback.
         // Only passive toasts retain their closing fade.
-        guard animated, !interactive else { finishDismissal(); return }
+        guard animated, !interactive else { finishDismissal(); return true }
         opacityTask?.cancel()
         resizeTask?.cancel(); resizeTask = nil
         let duration = interactive ? OverlayTheme.panelDisappear : OverlayTheme.toastDisappear
@@ -127,6 +128,7 @@ public final class OverlayPanel: NSPanel, NSWindowDelegate {
         opacityTask = motion(duration: duration, curve: OverlayTheme.easeIn, step: { [weak self] progress in
             self?.alphaValue = initial * (1 - progress)
         }, completion: { [weak self] in self?.finishDismissal() })
+        return true
     }
 
     public override func close() { dismiss() }
@@ -187,6 +189,7 @@ public final class OverlayPanel: NSPanel, NSWindowDelegate {
         finished = true
         opacityTask?.cancel(); opacityTask = nil
         resizeTask?.cancel(); resizeTask = nil
+        (contentView as? NoteEditorView)?.cancelPendingMeasure()
         contentView?.layer?.removeAllAnimations()
         // Ordering out a key nonactivating panel releases AppKit's borrowed focus.
         // Explicitly activating the previous app would alter its window ordering.

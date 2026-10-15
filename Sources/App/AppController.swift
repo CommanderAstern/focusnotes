@@ -35,8 +35,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         terminationRequested = true
         let shutdown = controller.beginTermination()
         Task {
-            await shutdown.value
-            sender.reply(toApplicationShouldTerminate: true)
+            let shouldTerminate = await shutdown.value
+            if !shouldTerminate { terminationRequested = false }
+            sender.reply(toApplicationShouldTerminate: shouldTerminate)
         }
         return .terminateLater
     }
@@ -77,7 +78,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var processingGeneration = 0
     private var isTerminating = false
     private var shutdownFinished = false
-    private var shutdownTask: Task<Void, Never>?
+    private var shutdownTask: Task<Bool, Never>?
     private var startupReplayTask: Task<Int, Never>?
     private var startupIndexTask: Task<Void, Never>?
     private(set) var acquisitionInProgress = false
@@ -85,6 +86,10 @@ final class AppController: NSObject, NSMenuDelegate {
     private var actionGeneration = 0
     private var activeSession: Session?
     private var statusItem: NSStatusItem?
+    private var shortcutItems: [(item: NSMenuItem, hotkey: Hotkey)] = []
+    private var hotkeyFailures: [Hotkey: HotkeyError] = [:]
+    private var shortcutStatusItem: NSMenuItem?
+    private var retryShortcutsItem: NSMenuItem?
     private var sessionItem: NSMenuItem?
     private var accessibilityItem: NSMenuItem?
     private var screenRecordingItem: NSMenuItem?
@@ -124,9 +129,10 @@ final class AppController: NSObject, NSMenuDelegate {
             if !CapturePermissions.accessibilityTrusted { CapturePermissions.promptForAccessibility() }
         }
         let indexing = Task.detached(priority: .utility) {
+            // Observe first: events received during the initial scan queue another pass.
+            pipeline.monitor.start()
             await pipeline.sync()
             guard !Task.isCancelled else { return }
-            pipeline.monitor.start()
             await pipeline.backfill()
         }
         startupIndexTask = indexing
@@ -136,6 +142,8 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func registerHotkeys() {
+        hotkeys.unregisterAll()
+        hotkeyFailures.removeAll()
         let bindings: [(Hotkey, @MainActor @Sendable () -> Void)] = [
             (.captureSelection, { [weak self] in self?.capture(.selection) }),
             (.captureRegion, { [weak self] in self?.capture(.region) }),
@@ -150,8 +158,14 @@ final class AppController: NSObject, NSMenuDelegate {
             case .success:
                 logger.notice("Hotkey \(binding.0.displayString, privacy: .public): registered")
             case .failure(let error):
+                hotkeyFailures[binding.0] = error
                 logger.error("Hotkey \(binding.0.displayString, privacy: .public): \(String(describing: error), privacy: .public)")
             }
+        }
+        refreshShortcutStatus()
+        if !hotkeyFailures.isEmpty {
+            showToast(Toast(style: .warning, title: "Some keyboard shortcuts are unavailable",
+                            subtitle: "Use the menu bar commands, then choose Retry Shortcuts", duration: 6))
         }
     }
 
@@ -357,8 +371,11 @@ final class AppController: NSObject, NSMenuDelegate {
     private func waitForCommits() async { _ = try? await commitTail?.value }
 
     /// Keep the main actor running while acquisitions and journaled writes drain.
-    func beginTermination(timeout: Duration = .seconds(5)) -> Task<Void, Never> {
+    func beginTermination(timeout: Duration = .seconds(5)) -> Task<Bool, Never> {
         if let shutdownTask { return shutdownTask }
+        // A failed final draft write must leave the app and its services usable for retry.
+        editor?.dismiss()
+        guard editor?.isVisible != true else { return Task { false } }
         let deadline = ContinuousClock.now.advanced(by: timeout)
         isTerminating = true
         startupIndexTask?.cancel()
@@ -369,7 +386,6 @@ final class AppController: NSObject, NSMenuDelegate {
         // Interactive dismissal is synchronous; cancel commits the pending default first.
         input?.dismiss()
         search?.dismiss()
-        editor?.dismiss()
         _ = commitPending()
         let pipeline = pipeline
         // OCR already owns pixels. Keep those pixels in a fixed-destination recovery
@@ -415,6 +431,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 drain.cancel()
                 logger.warning("Shutdown reached its deadline; prepared captures remain in the recovery journal")
             }
+            return true
         }
         shutdownTask = task
         return task
@@ -582,7 +599,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 editor.present(destination: sessionDestination?.title, isPinned: initiallyPinned, draft: draft, handlers: NoteEditorHandlers(
                     onDraft: { [weak editor] text in
                         let blank = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        try pipeline.drafts.store(text, pinOnSave: blank ? false : state.pinOnSave)
+                        try pipeline.drafts.flushScheduledStore(text, pinOnSave: blank ? false : state.pinOnSave)
                         if blank {
                             state.pinOnSave = false
                             editor?.setDestination(state.destination?.title, isPinned: relativePath(state.destination).map { pipeline.pins.isPinned($0) } ?? false)
@@ -655,12 +672,23 @@ final class AppController: NSObject, NSMenuDelegate {
                     },
                     onClose: { [weak controller] in controller?.editor = nil },
                     onError: { [weak controller] error in controller?.report(error, title: "Couldn't keep draft; editor stays open") },
-                    titleForText: { TypedNote(markdown: $0, createdAt: Date(), calendar: calendar).title }))
-                Task { @MainActor [weak controller, weak state] in
+                    titleForText: { TypedNote(markdown: $0, createdAt: Date(), calendar: calendar).title },
+                    onScheduleDraft: { [weak controller, weak editor] text in
+                        let blank = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        pipeline.drafts.scheduleStore(text, pinOnSave: blank ? false : state.pinOnSave) { [weak controller] error in
+                            Task { @MainActor in controller?.report(error, title: "Couldn't keep draft; editor stays open") }
+                        }
+                        if blank {
+                            state.pinOnSave = false
+                            editor?.setDestination(state.destination?.title, isPinned: relativePath(state.destination).map { pipeline.pins.isPinned($0) } ?? false)
+                        }
+                    }))
+                Task { @MainActor [weak controller, weak state, weak editor] in
                     guard let controller else { return }
                     let list = await controller.suggestionSnapshot(sessionsOnly: false)
                     guard !controller.isTerminating, let state else { return }
                     state.suggestions = list
+                    editor?.refreshBrowseItems()
                 }
             } catch { controller.report(error, title: "Couldn't restore draft") }
         }
@@ -923,8 +951,16 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(session)
         menu.addItem(menuItem("Write a Note…", hotkey: .writeNote, action: #selector(menuWriteNote)))
         menu.addItem(menuItem("Add Subheading…", hotkey: .addSubheading, action: #selector(menuSubheading)))
+        let shortcuts = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        shortcuts.isEnabled = false
+        shortcutStatusItem = shortcuts
+        menu.addItem(shortcuts)
+        let retry = menuItem("Retry Shortcuts", action: #selector(menuRetryShortcuts))
+        retry.toolTip = "Release conflicting shortcuts in other apps, then retry. Menu commands remain available."
+        retryShortcutsItem = retry
+        menu.addItem(retry)
         menu.addItem(.separator())
-        menu.addItem(menuItem("Open Notes Folder", action: #selector(menuOpenFolder)))
+        menu.addItem(menuItem("Open Notes Folder", hotkey: .openLibrary, action: #selector(menuOpenFolder)))
         let permissions = NSMenuItem(title: "Permissions", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         submenu.delegate = self
@@ -949,14 +985,29 @@ final class AppController: NSObject, NSMenuDelegate {
     private func menuItem(_ title: String, hotkey: Hotkey? = nil, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
-        if let hotkey { setMenuTitle(item, title: title, hotkey: hotkey) }
+        if let hotkey {
+            shortcutItems.append((item, hotkey))
+            setMenuTitle(item, title: title, hotkey: hotkey)
+        }
         return item
     }
 
     /// Shown natively in the menu's shortcut column. The Carbon hotkey consumes the keystroke system-wide, so the menu never handles it a second time.
     private func setMenuTitle(_ item: NSMenuItem, title: String, hotkey: Hotkey) {
+        Self.configureShortcut(item, title: title, hotkey: hotkey, failure: hotkeyFailures[hotkey])
+    }
+
+    static func configureShortcut(_ item: NSMenuItem, title: String, hotkey: Hotkey, failure: HotkeyError?) {
         item.attributedTitle = nil
         item.title = title
+        if let failure {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+            let reason = failure == .conflict ? "Another app uses this shortcut." : "macOS could not register this shortcut."
+            item.toolTip = "\(hotkey.displayString) unavailable. \(reason) Use this menu command, then choose Retry Shortcuts."
+            return
+        }
+        item.toolTip = nil
         item.keyEquivalent = hotkey.menuKeyEquivalent
         var mask: NSEvent.ModifierFlags = []
         if hotkey.modifiers.contains(.control) { mask.insert(.control) }
@@ -964,6 +1015,13 @@ final class AppController: NSObject, NSMenuDelegate {
         if hotkey.modifiers.contains(.shift) { mask.insert(.shift) }
         if hotkey.modifiers.contains(.command) { mask.insert(.command) }
         item.keyEquivalentModifierMask = mask
+    }
+
+    private func refreshShortcutStatus() {
+        for entry in shortcutItems { setMenuTitle(entry.item, title: entry.item.title, hotkey: entry.hotkey) }
+        shortcutStatusItem?.title = hotkeyFailures.count == 1 ? "1 keyboard shortcut unavailable" : "\(hotkeyFailures.count) keyboard shortcuts unavailable"
+        shortcutStatusItem?.isHidden = hotkeyFailures.isEmpty
+        retryShortcutsItem?.isHidden = hotkeyFailures.isEmpty
     }
 
     private func refreshStatus() {
@@ -974,6 +1032,7 @@ final class AppController: NSObject, NSMenuDelegate {
         if let sessionItem {
             setMenuTitle(sessionItem, title: activeSession.map { "End Session “\($0.name)”" } ?? "Start Session…", hotkey: .toggleSession)
         }
+        refreshShortcutStatus()
         accessibilityItem?.state = CapturePermissions.accessibilityTrusted ? .on : .off
         screenRecordingItem?.state = CapturePermissions.screenCaptureAllowed ? .on : .off
         let semantic = pipeline.semantic
@@ -1019,6 +1078,7 @@ final class AppController: NSObject, NSMenuDelegate {
     @objc private func menuSearch() { afterMenu { [weak self] in self?.openSearch() } }
     @objc private func menuWriteNote() { afterMenu { [weak self] in self?.openNoteEditor() } }
     @objc private func menuSubheading() { afterMenu { [weak self] in self?.openSubheading() } }
+    @objc private func menuRetryShortcuts() { afterMenu { [weak self] in self?.registerHotkeys() } }
     @objc private func menuSession() { afterMenu { [weak self] in self?.toggleSession() } }
     @objc private func menuOpenFolder() { afterMenu { [weak self] in self?.openNotesFolder() } }
     @objc private func menuAccessibility() {

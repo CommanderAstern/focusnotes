@@ -14,6 +14,7 @@ struct SelfTestFailure: Error, CustomStringConvertible {
 extension AppController {
     func runSelfTest() async throws -> String {
         try checkMenuKeyEquivalents()
+        try await checkAppReliability()
         try await checkNoteDraftStoreScheduling()
         if ProcessInfo.processInfo.environment["QUICK_NOTE_SELF_TEST"] == "1" {
             try await checkQuickNotePinPersistence()
@@ -91,7 +92,7 @@ extension AppController {
         }
         // Exercise the asynchronous termination drain, including a pending default commit.
         await stage(CapturePipeline.selection(text: "shutdownneedle pending capture", context: context))
-        await beginTermination().value
+        _ = await beginTermination().value
         guard !pipeline.monitor.isRunning else { throw SelfTestFailure("Vault watcher remained running on termination") }
 
         let stats = try await pipeline.index.sync()
@@ -302,7 +303,7 @@ extension AppController {
         try Data("{not json".utf8).write(to: pins.url)
         guard NotePinStore(stateDirectory: pinState).paths().isEmpty, try reloadedPins.toggle("d.md"),
               NotePinStore(stateDirectory: pinState).paths() == ["d.md"] else { throw SelfTestFailure("Pin store did not recover from a corrupt file") }
-        await controller.beginTermination().value
+        _ = await controller.beginTermination().value
         return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
     }
 
@@ -356,7 +357,7 @@ extension AppController {
               !FileManager.default.fileExists(atPath: legacyURL.path) else {
             throw SelfTestFailure("Atomic draft migration or pin preservation across edits failed")
         }
-        await controller.beginTermination().value
+        _ = await controller.beginTermination().value
         try await checkQuickNotePinSaveFailures(in: base)
         try await checkQuickNotePinRecovery(in: base)
     }
@@ -400,7 +401,7 @@ extension AppController {
               !fm.fileExists(atPath: root.appendingPathComponent("PinRetry 2.md").path) else {
             throw SelfTestFailure("Retry after removing draft pin intent pinned or duplicated the note")
         }
-        await retryController.beginTermination().value
+        _ = await retryController.beginTermination().value
 
         let pinBase = base.appendingPathComponent("PinStorageFailure", isDirectory: true)
         let pinPipeline = try await CapturePipeline.open(vaultRoot: pinBase.appendingPathComponent("Vault"),
@@ -431,7 +432,7 @@ extension AppController {
               !fm.fileExists(atPath: pinPipeline.vault.root.appendingPathComponent("PinFailure 2.md").path) else {
             throw SelfTestFailure("A nonfatal pin error left work that created another note on retry/re-save")
         }
-        await pinController.beginTermination().value
+        _ = await pinController.beginTermination().value
         guard try await pinPipeline.journal.recordURLs().isEmpty, try Data(contentsOf: saved.destination.url) == savedBytes else {
             throw SelfTestFailure("Shutdown retried a note that had already saved despite its pin error")
         }
@@ -473,14 +474,14 @@ extension AppController {
             var toasts: [Toast] = []
             if name.hasPrefix("Shutdown") {
                 // Exercise the actual preparedJobs shutdown retry, without another interactive save.
-                await originalController.beginTermination().value
+                _ = await originalController.beginTermination().value
                 recovered = original
             } else {
                 // Reopen from the journal without letting the old controller's shutdown save it first.
                 recovered = try await CapturePipeline.open(vaultRoot: root, stateDirectory: stateDirectory, calendar: pipeline.calendar)
                 let reopened = AppController(pipeline: recovered, presentsUI: false, onToast: { toasts.append($0) })
                 guard await reopened.start() == 1 else { throw SelfTestFailure("\(name): startup did not replay the job") }
-                await reopened.beginTermination().value
+                _ = await reopened.beginTermination().value
             }
             let path = "\(name).md"
             let expectedPin = name.hasSuffix("Pinned")
@@ -529,7 +530,7 @@ extension AppController {
             } catch is SelfTestFailure { throw SelfTestFailure("Injected destination failure unexpectedly succeeded") }
             catch {}
         }
-        await controller.beginTermination().value
+        _ = await controller.beginTermination().value
         let jobs = try await selfTestJournalJobs(original.journal)
         guard jobs.count == 2, jobs.contains(where: { $0.png == png }),
               jobs.allSatisfy({ $0.prepared.destination.url.pathComponents == note.pathComponents }) else { throw SelfTestFailure("Failed captures were not journaled") }
@@ -609,7 +610,7 @@ extension AppController {
         let rejected = controller.beginAcquisition { overlapped = true; return nil }
         let quit = controller.beginTermination()
         let afterQuit = controller.beginAcquisition { overlapped = true; return nil }
-        await quit.value
+        _ = await quit.value
         let hits = try await live.index.search("quit")
         guard accepted, !rejected, !afterQuit, !overlapped, hits.count == 2 else { throw SelfTestFailure("Acquisition/quit ordering failed") }
 
@@ -636,7 +637,7 @@ extension AppController {
                 regionLatch.release()
                 await ocrLatch.waitUntilHeld()
             }
-            await quit.value
+            _ = await quit.value
             guard start.duration(to: .now) < .seconds(2), try await delayed.journal.recordURLs().count == 1 else {
                 throw SelfTestFailure("Timed-out OCR pixels were lost or shutdown was unbounded")
             }

@@ -6,11 +6,13 @@ import CoreText
 final class MarkdownLayoutManager: NSLayoutManager {
     private var selectionLines = Set<NSRange>()
     private var composingLines = Set<NSRange>()
+    private var pendingSelectionInvalidationLines = Set<NSRange>()
     private var activeElements = Set<MarkdownStyler.Element>()
     private var activeSyntaxCharacters = IndexSet()
     private var composingCharacters = IndexSet()
     private var startingCompositionCharacters = IndexSet()
     private var startingComposition = false
+    private var pendingCharacterEdit = false
     private(set) var lastSelectionInvalidations: [NSRange] = []
     private(set) var selectionRevision = 0
 
@@ -26,11 +28,13 @@ final class MarkdownLayoutManager: NSLayoutManager {
     /// Attribute lookup is limited to the old and new selection lines.
     @discardableResult
     func updateSelection(_ selections: [NSRange], markedRange: NSRange = NSRange(location: NSNotFound, length: 0)) -> Bool {
+        guard !pendingCharacterEdit else { return false }
         guard let storage = textStorage else { return false }
         let source = storage.string as NSString
         let nextSelectionLines = logicalLines(selections, in: source)
         let nextComposing = markedRange.location == NSNotFound ? Set<NSRange>() : logicalLines([markedRange], in: source)
-        let affectedLines = selectionLines.union(nextSelectionLines).union(composingLines).union(nextComposing)
+        let affectedLines = selectionLines.union(nextSelectionLines).union(composingLines)
+            .union(nextComposing).union(pendingSelectionInvalidationLines)
         let affectedRanges = affectedLines.compactMap { bounded($0, to: source.length) }
         var elements = Set<MarkdownStyler.Element>()
         for range in affectedRanges {
@@ -69,6 +73,7 @@ final class MarkdownLayoutManager: NSLayoutManager {
         composingCharacters = indices(in: nextComposing)
         startingCompositionCharacters = []
         startingComposition = false
+        pendingSelectionInvalidationLines.removeAll()
 
         var invalidations = Set<NSRange>()
         for element in changedElements {
@@ -91,6 +96,66 @@ final class MarkdownLayoutManager: NSLayoutManager {
         }
         return true
     }
+
+    /// Keep the small set of selection/composition caches aligned with NSTextStorage's
+    /// post-edit coordinates. The attributed Element values are rebased by the editor;
+    /// this method moves only currently active ranges, never scans the document.
+    func textDidEdit(range: NSRange, changeInLength delta: Int) {
+        guard let storage = textStorage else { return }
+        pendingCharacterEdit = true
+        let source = storage.string as NSString
+        let location = min(max(0, range.location), source.length)
+        let oldLength = max(0, range.length - delta)
+        let oldRange = NSRange(location: location, length: oldLength)
+        let oldEnd = NSMaxRange(oldRange)
+        let currentLength = source.length
+        let newRange = NSRange(location: location, length: min(max(0, range.length), currentLength - location))
+        pendingSelectionInvalidationLines.formUnion(logicalLines([newRange], in: source))
+
+        func shifted(_ value: NSRange) -> NSRange? {
+            let end = NSMaxRange(value)
+            let newLocation: Int
+            if oldLength == 0 {
+                if end <= location { return value }
+                if value.location >= location { newLocation = value.location + delta }
+                else { return nil }
+            } else {
+                if end <= location { return value }
+                if value.location >= oldEnd { newLocation = value.location + delta }
+                else { return nil }
+            }
+            guard newLocation >= 0, newLocation + value.length <= currentLength else { return nil }
+            return NSRange(location: newLocation, length: value.length)
+        }
+
+        selectionLines = Set(selectionLines.compactMap(shifted))
+        composingLines = Set(composingLines.compactMap(shifted))
+        activeElements = Set(activeElements.compactMap { element in
+            guard let range = shifted(element.range) else { return nil }
+            return MarkdownStyler.Element(range: range, kind: element.kind)
+        })
+
+        func shiftedIndices(_ values: IndexSet) -> IndexSet {
+            var result = IndexSet()
+            for run in values.rangeView {
+                if run.lowerBound < location {
+                    let end = min(run.upperBound, location)
+                    if end > run.lowerBound { result.insert(integersIn: run.lowerBound..<end) }
+                }
+                let suffixStart = max(run.lowerBound, oldEnd)
+                let suffixEnd = run.upperBound
+                let movedStart = max(0, suffixStart + delta)
+                let movedEnd = min(currentLength, suffixEnd + delta)
+                if movedEnd > movedStart { result.insert(integersIn: movedStart..<movedEnd) }
+            }
+            return result
+        }
+        activeSyntaxCharacters = shiftedIndices(activeSyntaxCharacters)
+        composingCharacters = shiftedIndices(composingCharacters)
+        startingCompositionCharacters = shiftedIndices(startingCompositionCharacters)
+    }
+
+    func finishTextEdit() { pendingCharacterEdit = false }
 
     func prepareComposition() {
         startingComposition = true

@@ -237,6 +237,13 @@ final class NoteTextView: NSTextView {
 
     private func isInsideFencedCode(before lineStart: Int) -> Bool {
         let source = string as NSString
+        if lineStart > 0, lineStart <= source.length, !hasMarkedText(),
+           let storage = textStorage, storage.length > 0,
+           let state = storage.attribute(MarkdownStyler.fenceStateAfter,
+                                         at: min(lineStart - 1, storage.length - 1),
+                                         effectiveRange: nil) as? MarkdownStyler.FenceState {
+            return state.isOpen
+        }
         var offset = 0
         var fence: (character: unichar, length: Int)?
         while offset < lineStart {
@@ -349,8 +356,12 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
     private let restoredDraft: Bool
     private let draftLabel = label("Draft kept", font: OverlayTheme.metaFont, color: OverlayTheme.tertiaryColor)
     private var editedRange: NSRange?
+    private var editedDelta = 0
     private var styling = false
     private var restyleForAppearance = false
+    private var measurementTask: Task<Void, Never>?
+    private var pendingMeasuredWidth: CGFloat = 0
+    private var lastMeasuredAt = Date.distantPast
     private(set) var textHeight: CGFloat = 0
     private var documentHeight: CGFloat = 0
     private var currentWidth = OverlayTheme.quickMinWidth
@@ -624,6 +635,22 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
         browseView = browse
         attach(browse)
     }
+    func refreshBrowseItems() {
+        guard let current = browseView else { return }
+        let query = current.field.stringValue
+        let selectedID = current.selectedID
+        let items = browseItems()
+        let trimmedQuery = query.trimmingCharacters(in: .whitespaces)
+        let matches = trimmedQuery.isEmpty ? items : items.filter { $0.title.localizedCaseInsensitiveContains(trimmedQuery) }
+        let shown = Array((matches.filter(\.isPinned) + matches.filter { !$0.isPinned }).prefix(OverlayTheme.browseMaxRows))
+        let selectedIndex = selectedID.flatMap { id in shown.firstIndex(where: { $0.id == id }) }
+        detachBrowse()
+        let browse = NoteBrowseView(items: items, query: query, selectedIndex: selectedIndex)
+        browse.onChoose = { [weak self] item, choice in self?.onBrowseChoice?(item, choice) }
+        browse.onBack = { [weak self] in self?.hideBrowse() }
+        browseView = browse
+        attach(browse)
+    }
     func hideBrowse() {
         guard browseView != nil else { return }
         detachBrowse()
@@ -711,33 +738,77 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
         manager.synchronize(textView)
     }
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range: NSRange, changeInLength delta: Int) {
-        if !styling, editedMask.contains(.editedCharacters) { editedRange = range }
+        if !styling, editedMask.contains(.editedCharacters) {
+            // The active AppKit SDK reports the affected character range in post-edit
+            // coordinates; changeInLength recovers the replaced pre-edit span.
+            editedRange = range
+            editedDelta = delta
+            (textView.layoutManager as? MarkdownLayoutManager)?.textDidEdit(range: range, changeInLength: delta)
+        }
     }
     private func refreshText() {
         placeholder.isHidden = !textView.string.isEmpty
         updateTitle()
-        guard !textView.hasMarkedText(), let storage = textView.textStorage else { return }
-        let source = textView.string as NSString
+        guard let storage = textView.textStorage else { return }
+        let text = storage.string
+        let source = text as NSString
+        if editedDelta != 0, let safe = editedRange.map({ NSIntersectionRange($0, NSRange(location: 0, length: source.length)) }),
+           source.length > 0 {
+            let probe = min(safe.location, source.length - 1)
+            let changedLine = source.paragraphRange(for: NSRange(location: probe, length: min(max(1, safe.length), source.length - probe)))
+            MarkdownStyler.rebaseElementRanges(in: storage, after: NSMaxRange(changedLine), by: editedDelta)
+            editedDelta = 0
+        }
+        guard !textView.hasMarkedText() else { return }
         let manager = textView.layoutManager as? MarkdownLayoutManager
-        let range: NSRange
-        if !restyleForAppearance, source.length > OverlayTheme.editorRestyleLimit, let editedRange {
-            let safe = NSIntersectionRange(editedRange, NSRange(location: 0, length: source.length))
-            range = source.paragraphRange(for: safe)
-        } else { range = NSRange(location: 0, length: source.length) }
+        let localEdit = !restyleForAppearance && source.length > OverlayTheme.editorRestyleLimit ? editedRange : nil
+        let safeEdit = localEdit.map { NSIntersectionRange($0, NSRange(location: 0, length: source.length)) }
+        let changedParagraph: NSRange? = safeEdit.map { safe in
+            let probe = min(safe.location, max(0, source.length - 1))
+            return source.paragraphRange(for: NSRange(location: probe, length: min(max(1, safe.length), source.length - probe)))
+        }
+        let fullRestyle = changedParagraph == nil
+        let start = changedParagraph?.location ?? 0
+        let incomingFence = start > 0
+            ? storage.attribute(MarkdownStyler.fenceStateAfter, at: start - 1, effectiveRange: nil) as? MarkdownStyler.FenceState ?? .outside
+            : .outside
+        let scan: MarkdownStyler.ScanResult
+        if let changedParagraph, let safeEdit {
+            let minimumEnd = max(NSMaxRange(changedParagraph), NSMaxRange(safeEdit))
+            scan = MarkdownStyler.scan(text, from: start, startingFence: incomingFence) { line, state in
+                guard NSMaxRange(line) >= minimumEnd, line.location < source.length,
+                      let previousState = storage.attribute(MarkdownStyler.fenceStateAfter, at: line.location,
+                                                            effectiveRange: nil) as? MarkdownStyler.FenceState else { return false }
+                return state == previousState
+            }
+        } else {
+            scan = MarkdownStyler.scan(text, from: 0, startingFence: .outside)
+        }
         styling = true
         textView.undoManager?.disableUndoRegistration()
         storage.beginEditing()
-        storage.setAttributes(typingAttributes, range: range)
-        for span in MarkdownStyler.styles(textView.string, in: range) { storage.addAttributes(span.attributes, range: span.range) }
-        normalizeLineHeights(in: range)
+        storage.setAttributes(typingAttributes, range: scan.processedRange)
+        for span in scan.spans { storage.addAttributes(span.attributes, range: span.range) }
+        normalizeLineHeights(in: scan.processedRange)
         storage.endEditing()
+        manager?.finishTextEdit()
         manager?.synchronize(textView)
-        manager?.applyParagraphs(in: range)
-        if range.length > 0 { manager?.invalidateGlyphs(forCharacterRange: range, changeInLength: 0, actualCharacterRange: nil) }
+        manager?.applyParagraphs(in: scan.processedRange)
+        if scan.processedRange.length > 0 {
+            manager?.invalidateGlyphs(forCharacterRange: scan.processedRange, changeInLength: 0, actualCharacterRange: nil)
+        }
         textView.undoManager?.enableUndoRegistration()
-        styling = false; editedRange = nil; restyleForAppearance = false
+        styling = false; editedRange = nil; editedDelta = 0; restyleForAppearance = false
         textView.typingAttributes = typingAttributes
-        measure()
+        if source.length > OverlayTheme.editorRestyleLimit {
+            if let changedParagraph, !fullRestyle, currentWidth < OverlayTheme.quickMaxWidth {
+                pendingMeasuredWidth = max(pendingMeasuredWidth, naturalTextWidth(in: changedParagraph))
+            }
+            scheduleMeasure(remeasureAllWidth: fullRestyle)
+        } else {
+            cancelPendingMeasure()
+            measure()
+        }
     }
     private var bodyParagraphStyle: NSParagraphStyle {
         let paragraph = NSMutableParagraphStyle()
@@ -793,11 +864,37 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
         source.enumerateSubstrings(in: NSRange(location: 0, length: source.length), options: [.byParagraphs, .substringNotRequired]) { _, range, _, stop in
             seen += 1
             if seen > OverlayTheme.quickMeasuredParagraphs { stop.pointee = true; return }
-            guard range.length > 0 else { return }
-            let box = storage.attributedSubstring(from: range).boundingRect(with: NSSize(width: 1_000_000, height: 1_000_000), options: [.usesLineFragmentOrigin])
-            widest = max(widest, box.width)
+            widest = max(widest, self.naturalTextWidth(in: range))
         }
-        return ceil(widest) + OverlayTheme.quickIndentAllowance
+        return widest
+    }
+    private func naturalTextWidth(in range: NSRange) -> CGFloat {
+        guard let storage = textView.textStorage, range.length > 0,
+              range.location >= 0, NSMaxRange(range) <= storage.length else { return 0 }
+        let box = storage.attributedSubstring(from: range).boundingRect(with: NSSize(width: 1_000_000, height: 1_000_000),
+                                                                        options: [.usesLineFragmentOrigin])
+        return ceil(box.width) + OverlayTheme.quickIndentAllowance
+    }
+    private func scheduleMeasure(remeasureAllWidth: Bool = false) {
+        if remeasureAllWidth { pendingMeasuredWidth = max(pendingMeasuredWidth, naturalTextWidth()) }
+        measurementTask?.cancel()
+        let now = Date()
+        let quietDeadline = now.addingTimeInterval(0.18)
+        let maximumStalenessDeadline = lastMeasuredAt.addingTimeInterval(0.25)
+        let wait = max(0, min(quietDeadline, maximumStalenessDeadline).timeIntervalSince(now))
+        measurementTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(Int((wait * 1_000).rounded()))) } catch { return }
+            guard let self else { return }
+            let width = self.pendingMeasuredWidth
+            self.pendingMeasuredWidth = 0
+            self.measurementTask = nil
+            self.measure(textWidth: width)
+        }
+    }
+    func cancelPendingMeasure() {
+        measurementTask?.cancel()
+        measurementTask = nil
+        pendingMeasuredWidth = 0
     }
     private func layoutText() {
         let inset = OverlayTheme.quickTextInset
@@ -806,12 +903,13 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
         scroll.frame = NSRect(x: inset, y: OverlayTheme.quickTopBandHeight, width: currentWidth - inset * 2, height: height)
         textView.setFrameSize(NSSize(width: scroll.contentSize.width, height: max(textHeight, documentHeight)))
     }
-    private func measure() {
+    private func measure(textWidth: CGFloat? = nil) {
         guard let container = textView.textContainer, let manager = textView.layoutManager else { return }
         // The width only ratchets up, so skip measuring once it is at the cap.
         let floor = max(OverlayTheme.quickMinWidth, footerNaturalWidth(includeDraft: restoredDraft))
         let width = currentWidth >= OverlayTheme.quickMaxWidth ? currentWidth
-            : min(OverlayTheme.quickMaxWidth, max(floor, naturalTextWidth() + OverlayTheme.quickTextInset * 2))
+            : min(OverlayTheme.quickMaxWidth,
+                  max(floor, (textWidth ?? naturalTextWidth()) + OverlayTheme.quickTextInset * 2))
         let grew = width > currentWidth
         if grew { currentWidth = width }
         updateDraftVisibility()
@@ -825,6 +923,9 @@ final class NoteEditorView: FlippedView, NSTextViewDelegate, @MainActor NSTextSt
         let height = min(maximum, documentHeight)
         scroll.hasVerticalScroller = used > maximum
         if textHeight != height || grew { textHeight = height; resize() }
+        // `usedRect` follows a full accurate AppKit layout so every line remains scrollable.
+        // Editor changes coalesce that necessary work to the quiet period / 250 ms cap above.
+        lastMeasuredAt = Date()
         needsLayout = true
     }
     func setPreviewSelection(_ selection: NSRange) {
@@ -878,15 +979,21 @@ public struct NoteEditorHandlers {
     public var onError: (Error) -> Void
     /// The title a new note gets for this text, shown in the top band until a destination is chosen.
     public var titleForText: (String) -> String
+    /// Fast, coalesced persistence path for edits; `onDraft` remains the synchronous flush barrier.
+    public var onScheduleDraft: (String) -> Void
 
     public init(onDraft: @escaping (String) throws -> Void, onSubmit: @escaping (String) -> Void,
                 onNew: @escaping (String) -> Void, onOpenAsNote: @escaping (String) -> Void,
                 browseItems: @escaping () -> [BrowseItem], onBrowse: @escaping (BrowseItem, BrowseChoice) -> Void,
                 onTogglePin: @escaping () -> Bool, onClose: @escaping () -> Void, onError: @escaping (Error) -> Void,
-                titleForText: @escaping (String) -> String = NoteEditorHandlers.defaultTitle) {
+                titleForText: @escaping (String) -> String = NoteEditorHandlers.defaultTitle,
+                onScheduleDraft: ((String) -> Void)? = nil) {
         self.onDraft = onDraft; self.onSubmit = onSubmit; self.onNew = onNew; self.onOpenAsNote = onOpenAsNote
         self.browseItems = browseItems; self.onBrowse = onBrowse; self.onTogglePin = onTogglePin
         self.onClose = onClose; self.onError = onError; self.titleForText = titleForText
+        self.onScheduleDraft = onScheduleDraft ?? { text in
+            do { try onDraft(text) } catch { onError(error) }
+        }
     }
 
     /// First non-blank line with leading Markdown markers (heading, list, task box, quote, number) removed.
@@ -948,7 +1055,7 @@ public final class NoteEditorPanel {
             do { try handlers.onDraft(view.textView.string); return true }
             catch { handlers.onError(error); return false }
         }
-        view.onChange = { text in do { try handlers.onDraft(text) } catch { handlers.onError(error) } }
+        view.onChange = handlers.onScheduleDraft
         view.onResize = { [weak panel] size, animated in panel?.resizeContent(to: size, animated: animated) }
         view.onClose = { [weak panel] in panel?.dismiss() }
         view.textView.onSave = { [weak panel, weak view] in
@@ -981,5 +1088,13 @@ public final class NoteEditorPanel {
     }
 
     public func setDestination(_ title: String?, isPinned: Bool) { content?.setDestination(title, isPinned: isPinned) }
-    public func dismiss() { panel?.dismiss() }
+    @discardableResult
+    public func dismiss() -> Bool {
+        guard let panel else { return true }
+        return panel.dismiss()
+    }
+
+    /// Refresh an open Browse card after its asynchronous note snapshot arrives. Keep its
+    /// filter text and selected item when that item is still present in the new snapshot.
+    public func refreshBrowseItems() { content?.refreshBrowseItems() }
 }

@@ -79,9 +79,19 @@ func checkMarkdownStyler() throws {
     let fenceText = "```\n# heading **bold** *italic* [link](https://example.com) ~~strike~~\n```"
     let fenceStyles = MarkdownStyler.styles(fenceText)
     let interior = (fenceText as NSString).range(of: "# heading **bold** *italic* [link](https://example.com) ~~strike~~")
-    try expect(fenceStyles.filter { NSIntersectionRange($0.range, interior).length > 0 }.allSatisfy {
-        $0.attributes[.strikethroughStyle] == nil && $0.attributes[.foregroundColor] == nil && ($0.attributes[.font] as? NSFont) == OverlayTheme.editorCodeFont
-    }, "No inline or heading styling inside fences")
+    let fencedStorage = NSMutableAttributedString(string: fenceText, attributes: MarkdownStyler.baseAttributes)
+    for span in fenceStyles { fencedStorage.addAttributes(span.attributes, range: span.range) }
+    for index in interior.location..<NSMaxRange(interior) {
+        let attributes = fencedStorage.attributes(at: index, effectiveRange: nil)
+        try expect((attributes[.font] as? NSFont) == OverlayTheme.editorCodeFont
+                   && (attributes[.foregroundColor] as? NSColor) == OverlayTheme.textColor
+                   && attributes[.strikethroughStyle] == nil
+                   && attributes[MarkdownStyler.inlineCode] == nil
+                   && attributes[MarkdownStyler.element] == nil
+                   && attributes[MarkdownStyler.syntax] == nil
+                   && attributes[MarkdownStyler.fencedCodeBlock] as? Bool == true,
+                   "No inline or heading styling inside fences")
+    }
     let large = String(repeating: editorSample + "\n", count: 50)
     let largeSource = large as NSString
     let paragraph = largeSource.paragraphRange(for: NSRange(location: largeSource.range(of: "Reviewed").location, length: 1))
@@ -90,7 +100,126 @@ func checkMarkdownStyler() throws {
     let elapsed = start.duration(to: .now)
     let limited = MarkdownStyler.styles(large, in: paragraph)
     try expect(!limited.isEmpty && limited.allSatisfy { NSIntersectionRange($0.range, paragraph) == $0.range }, "Large document paragraph cap")
-    print("MarkdownStyler checks passed; ten ~20k-character full passes: \(elapsed); large-document paragraph cap verified.")
+
+    func fullyStyled(_ value: String) -> NSMutableAttributedString {
+        let storage = NSMutableAttributedString(string: value, attributes: MarkdownStyler.baseAttributes)
+        for span in MarkdownStyler.styles(value) { storage.addAttributes(span.attributes, range: span.range) }
+        return storage
+    }
+    func sameAttribute(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        let left: Any
+        let right: Any
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (.some(_), nil), (nil, .some(_)): return false
+        case let (.some(lhs), .some(rhs)):
+            left = lhs
+            right = rhs
+        }
+        let lhs = left
+        let rhs = right
+        if let lhs = lhs as? MarkdownStyler.Element, let rhs = rhs as? MarkdownStyler.Element { return lhs == rhs }
+        if let lhs = lhs as? MarkdownStyler.FenceState, let rhs = rhs as? MarkdownStyler.FenceState { return lhs == rhs }
+        if let lhs = lhs as? NSNumber, let rhs = rhs as? NSNumber { return lhs == rhs }
+        if let lhs = lhs as? NSObject { return lhs.isEqual(rhs) }
+        return String(describing: lhs) == String(describing: rhs)
+    }
+    func incrementallyEdit(_ original: String, token: String, replacement: String) throws -> (NSMutableAttributedString, NSRange, Duration) {
+        let storage = fullyStyled(original)
+        let oldSource = storage.string as NSString
+        let oldRange = oldSource.range(of: token)
+        guard oldRange.location != NSNotFound else { throw GalleryError("Missing incremental-style fixture: \(token)") }
+        let editStart = ContinuousClock.now
+        storage.replaceCharacters(in: oldRange, with: replacement)
+        let value = storage.string
+        let source = value as NSString
+        let changed = NSRange(location: oldRange.location, length: (replacement as NSString).length)
+        let probe = min(changed.location, max(0, source.length - 1))
+        let paragraph = source.paragraphRange(for: NSRange(location: probe, length: min(max(1, changed.length), source.length - probe)))
+        MarkdownStyler.rebaseElementRanges(in: storage, after: NSMaxRange(paragraph),
+                                           by: changed.length - oldRange.length)
+        let start = paragraph.location
+        let incoming = start > 0
+            ? storage.attribute(MarkdownStyler.fenceStateAfter, at: start - 1, effectiveRange: nil) as? MarkdownStyler.FenceState ?? .outside
+            : .outside
+        let minimumEnd = max(NSMaxRange(paragraph), NSMaxRange(changed))
+        let scan = MarkdownStyler.scan(value, from: start, startingFence: incoming) { line, state in
+            guard NSMaxRange(line) >= minimumEnd, line.location < source.length,
+                  let oldState = storage.attribute(MarkdownStyler.fenceStateAfter, at: line.location,
+                                                   effectiveRange: nil) as? MarkdownStyler.FenceState else { return false }
+            return state == oldState
+        }
+        storage.setAttributes(MarkdownStyler.baseAttributes, range: scan.processedRange)
+        for span in scan.spans { storage.addAttributes(span.attributes, range: span.range) }
+        let editElapsed = editStart.duration(to: .now)
+        let expected = fullyStyled(value)
+        let attributes: [NSAttributedString.Key] = [
+            .font, .foregroundColor, .paragraphStyle, .strikethroughStyle,
+            MarkdownStyler.syntax, MarkdownStyler.element, MarkdownStyler.bullet,
+            MarkdownStyler.task, MarkdownStyler.taskIndent, MarkdownStyler.quote,
+            MarkdownStyler.rawParagraph, MarkdownStyler.previewParagraph,
+            MarkdownStyler.fencedCodeBlock, MarkdownStyler.inlineCode, MarkdownStyler.fenceStateAfter
+        ]
+        guard storage.length == expected.length else { throw GalleryError("Incremental style changed UTF-16 length") }
+        for index in 0..<storage.length {
+            for key in attributes where !sameAttribute(storage.attribute(key, at: index, effectiveRange: nil),
+                                                        expected.attribute(key, at: index, effectiveRange: nil)) {
+                throw GalleryError("Incremental Markdown styling differed at UTF-16 offset \(index), attribute \(key)")
+            }
+        }
+        return (storage, scan.processedRange, editElapsed)
+    }
+
+    let unicodeDocument = "😀 heading\n# **outside**\nplain\n```swift\nprint(\"**code**\")\n```\n# after\n"
+    let openedFence = try incrementallyEdit(unicodeDocument, token: "plain", replacement: "```\nplain")
+    try expect(openedFence.1.length < (openedFence.0.string as NSString).length,
+               "Opening a fence should restyle only through the first unchanged fence boundary")
+    let reopened = openedFence.0.string as NSString
+    try expect(openedFence.0.attribute(MarkdownStyler.fencedCodeBlock, at: reopened.range(of: "# **outside**").location, effectiveRange: nil) as? Bool != true,
+               "Text before an inserted fence must keep its Markdown styling")
+    try expect(openedFence.0.attribute(MarkdownStyler.fencedCodeBlock, at: reopened.range(of: "# after").location, effectiveRange: nil) as? Bool != true,
+               "A later unchanged closing fence must end the inserted code block")
+
+    let removedCloser = try incrementallyEdit(unicodeDocument, token: "```\n# after", replacement: "not-a-fence\n# after")
+    let afterRemovedCloser = (removedCloser.0.string as NSString).range(of: "# after")
+    try expect(removedCloser.0.attribute(MarkdownStyler.fencedCodeBlock, at: afterRemovedCloser.location, effectiveRange: nil) as? Bool == true,
+               "Removing a closing fence must propagate code styling through the suffix")
+    try expect(NSMaxRange(removedCloser.1) == removedCloser.0.length,
+               "An unmatched opening fence must rescan to end-of-document")
+
+    let addedCloser = try incrementallyEdit("😀 title\n```swift\n**code**\n# still code\n# after\n",
+                                            token: "**code**\n", replacement: "**code**\n```\n")
+    let afterAddedCloser = (addedCloser.0.string as NSString).range(of: "# still code")
+    try expect(addedCloser.0.attribute(MarkdownStyler.fencedCodeBlock, at: afterAddedCloser.location, effectiveRange: nil) as? Bool != true,
+               "An inserted closing fence must restore Markdown styling below it")
+
+    let offsetDocument = "😀 lead\nplain text\n# Heading **bold**\n[link](https://example.org) and ~~strike~~\n- [ ] task\n"
+    _ = try incrementallyEdit(offsetDocument, token: "lead", replacement: "a much longer lead")
+    _ = try incrementallyEdit(offsetDocument, token: "plain text", replacement: "plain")
+
+    let heavyTail = String(repeating: "# Heading **bold** [link](https://example.org) - [ ] task\n", count: 600)
+    let heavyDocument = "😀 prefix\n" + heavyTail
+    let heavyStorage = fullyStyled(heavyDocument)
+    let heavySource = heavyStorage.string as NSString
+    let prefix = heavySource.range(of: "prefix")
+    heavyStorage.replaceCharacters(in: prefix, with: "a much longer prefix")
+    let editedSource = heavyStorage.string as NSString
+    let changedParagraph = editedSource.paragraphRange(for: NSRange(location: prefix.location, length: 1))
+    let rebaseStart = ContinuousClock.now
+    MarkdownStyler.rebaseElementRanges(in: heavyStorage, after: NSMaxRange(changedParagraph),
+                                       by: ("a much longer prefix" as NSString).length - prefix.length)
+    let rebaseElapsed = rebaseStart.duration(to: .now)
+    let lastLink = editedSource.range(of: "[link]", options: .backwards)
+    let lastLinkElement = heavyStorage.attribute(MarkdownStyler.element, at: lastLink.location, effectiveRange: nil) as? MarkdownStyler.Element
+    try expect(lastLinkElement?.range.location == lastLink.location,
+               "Large Markdown suffix rebasing must keep the final link's UTF-16 range aligned")
+
+    let headInserted = try incrementallyEdit(heavyDocument, token: "prefix", replacement: "a much longer prefix")
+    let headDeleted = try incrementallyEdit(headInserted.0.string, token: "a much longer prefix", replacement: "prefix")
+    let withTail = heavyDocument + "tail-marker\n"
+    let tailInserted = try incrementallyEdit(withTail, token: "tail-marker", replacement: "tail-marker 😀")
+    let tailDeleted = try incrementallyEdit(tailInserted.0.string, token: "tail-marker 😀", replacement: "tail-marker")
+    print("MarkdownStyler checks passed; ten ~20k-character full passes: \(elapsed); 600-line suffix rebase: \(rebaseElapsed); incremental head insert/delete: \(headInserted.2)/\(headDeleted.2); tail insert/delete: \(tailInserted.2)/\(tailDeleted.2); paragraph cap verified.")
 }
 
 /// Pixel assertions catch appearance/alpha resolution and ragged fence fills in

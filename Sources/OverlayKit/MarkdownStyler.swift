@@ -7,6 +7,22 @@ public enum MarkdownStyler {
     /// A layout decoration, independent of font/color runs within a code block.
     public static let fencedCodeBlock = NSAttributedString.Key("OverlayKit.fencedCodeBlock")
     public static let inlineCode = NSAttributedString.Key("OverlayKit.inlineCode")
+    /// The fence state after a logical line, cached on its characters for incremental restyling.
+    public static let fenceStateAfter = NSAttributedString.Key("OverlayKit.fenceStateAfter")
+
+    public struct FenceState: Hashable, Sendable {
+        fileprivate let character: unichar
+        fileprivate let length: Int
+        public static let outside = FenceState(character: 0, length: 0)
+        public var isOpen: Bool { length > 0 }
+        fileprivate init(character: unichar, length: Int) { self.character = character; self.length = length }
+    }
+
+    public struct ScanResult {
+        public let spans: [Span]
+        /// The complete physical lines whose old attributes should be replaced by `spans`.
+        public let processedRange: NSRange
+    }
 
     public static let syntax = NSAttributedString.Key("OverlayKit.markdownSyntax")
     public static let element = NSAttributedString.Key("OverlayKit.markdownElement")
@@ -33,6 +49,36 @@ public enum MarkdownStyler {
         }
     }
 
+    /// NSTextStorage moves an attribute run when text is inserted or removed before it,
+    /// but it cannot adjust the absolute range stored inside an Element value. Rebase just
+    /// those semantic runs in the untouched suffix; Markdown parsing stays local to the edit.
+    public static func rebaseElementRanges(in storage: NSMutableAttributedString, after location: Int, by delta: Int) {
+        guard delta != 0, storage.length > 0 else { return }
+        let start = min(max(0, location), storage.length)
+        guard start < storage.length else { return }
+        // Bound temporary storage even for a huge suffix with many tiny Markdown spans.
+        let batchSize = 4_096
+        var batchStart = start
+        storage.beginEditing()
+        while batchStart < storage.length {
+            let batch = NSRange(location: batchStart, length: min(batchSize, storage.length - batchStart))
+            var updates: [(NSRange, Element)] = []
+            storage.enumerateAttribute(element, in: batch) { value, run, _ in
+                guard let value = value as? Element else { return }
+                let shifted = value.range.location + delta
+                guard shifted >= 0 else { return }
+                let affected = NSIntersectionRange(run, batch)
+                guard affected.length > 0 else { return }
+                updates.append((affected, Element(range: NSRange(location: shifted, length: value.range.length), kind: value.kind)))
+            }
+            if !updates.isEmpty {
+                for (run, value) in updates { storage.addAttribute(element, value: value, range: run) }
+            }
+            batchStart = NSMaxRange(batch)
+        }
+        storage.endEditing()
+    }
+
     public static var baseAttributes: [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineHeightMultiple = OverlayTheme.editorLineHeightMultiple
@@ -43,10 +89,27 @@ public enum MarkdownStyler {
     /// Large documents restrict attribute generation to edited paragraphs. Fence
     /// context is scanned as plain lines, without running inline expressions there.
     public static func styles(_ text: String, in requested: NSRange? = nil) -> [Span] {
+        scanCore(text, outputRange: requested, from: 0, startingFence: .outside, stopAfterLine: nil).spans
+    }
+
+    /// Restyle from an already-known fence boundary. The caller can stop once the new
+    /// outgoing fence state matches the cached state for an unchanged suffix line.
+    public static func scan(_ text: String, from location: Int, startingFence: FenceState,
+                            stopAfterLine: ((NSRange, FenceState) -> Bool)? = nil) -> ScanResult {
+        scanCore(text, outputRange: nil, from: location, startingFence: startingFence, stopAfterLine: stopAfterLine)
+    }
+
+    private static func scanCore(_ text: String, outputRange requested: NSRange?, from requestedStart: Int,
+                                 startingFence initialFence: FenceState,
+                                 stopAfterLine: ((NSRange, FenceState) -> Bool)?) -> ScanResult {
         let source = text as NSString
-        let target = requested ?? NSRange(location: 0, length: source.length)
+        guard source.length > 0 else { return ScanResult(spans: [], processedRange: .init(location: 0, length: 0)) }
+        let startProbe = min(max(0, requestedStart), source.length - 1)
+        let start = source.lineRange(for: NSRange(location: startProbe, length: 0)).location
+        let target = requested ?? NSRange(location: start, length: source.length - start)
         var spans: [Span] = []
-        var fence: (character: unichar, length: Int)?
+        var fence: FenceState = initialFence
+        var processedEnd = start
         func add(_ range: NSRange, _ attributes: [NSAttributedString.Key: Any]) {
             let intersection = NSIntersectionRange(range, target)
             if intersection.length > 0 { spans.append((intersection, attributes)) }
@@ -61,7 +124,7 @@ public enum MarkdownStyler {
             }
             return regex.matches(in: text, range: range)
         }
-        var offset = 0
+        var offset = start
         while offset < source.length {
             let line = source.lineRange(for: NSRange(location: offset, length: 0))
             let value = source.substring(with: line) as NSString
@@ -75,13 +138,15 @@ public enum MarkdownStyler {
             }
             let rest = trimmed.substring(from: min(trimmed.length, indent + run))
             var fenceLine = false
-            if let current = fence {
-                if first == current.character, run >= current.length,
-                   rest.trimmingCharacters(in: .whitespaces).isEmpty { fence = nil; fenceLine = true }
+            if fence.isOpen {
+                if first == fence.character, run >= fence.length,
+                   rest.trimmingCharacters(in: .whitespaces).isEmpty { fence = .outside; fenceLine = true }
             } else if run >= 3, first != 96 || !rest.contains("`") {
-                fence = (first, run); fenceLine = true
+                fence = FenceState(character: first, length: run); fenceLine = true
             }
-            if fence != nil || fenceLine {
+            let outgoingFence = fence
+            add(line, [fenceStateAfter: outgoingFence])
+            if fence.isOpen || fenceLine {
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.lineHeightMultiple = OverlayTheme.editorLineHeightMultiple
                 paragraph.firstLineHeadIndent = OverlayTheme.codeBlockInset
@@ -89,9 +154,17 @@ public enum MarkdownStyler {
                 paragraph.tailIndent = -OverlayTheme.codeBlockInset
                 add(line, [.font: OverlayTheme.editorCodeFont, .paragraphStyle: paragraph, fencedCodeBlock: true])
                 if fenceLine { add(line, [.foregroundColor: OverlayTheme.tertiaryColor]) }
-                offset = NSMaxRange(line); continue
+                processedEnd = NSMaxRange(line)
+                offset = processedEnd
+                if stopAfterLine?(line, outgoingFence) == true { break }
+                continue
             }
-            guard NSIntersectionRange(line, target).length > 0 else { offset = NSMaxRange(line); continue }
+            guard NSIntersectionRange(line, target).length > 0 else {
+                processedEnd = NSMaxRange(line)
+                offset = processedEnd
+                if stopAfterLine?(line, outgoingFence) == true { break }
+                continue
+            }
             var lineFont = OverlayTheme.editorFont
             if let heading = matches("^#+ ", line).first {
                 let level = heading.range.length - 1
@@ -186,8 +259,10 @@ public enum MarkdownStyler {
                     add(label, [.foregroundColor: OverlayTheme.editorLinkColor])
                 }
             }
-            offset = NSMaxRange(line)
+            processedEnd = NSMaxRange(line)
+            offset = processedEnd
+            if stopAfterLine?(line, outgoingFence) == true { break }
         }
-        return spans
+        return ScanResult(spans: spans, processedRange: NSRange(location: start, length: processedEnd - start))
     }
 }

@@ -250,6 +250,7 @@ func runBehaviorChecks() async throws {
     try await settle()
     try require(canceledQuery, "Dismissal did not cancel an outstanding query")
     try await checkNoteLineHeights()
+    try await checkCoalescedLongNoteLayout()
     try await checkStickyNotes()
     try await checkNoteEditorBehavior()
     try await checkNoteOverlays()
@@ -1297,6 +1298,94 @@ private func checkNoteLineHeights() async throws {
     try await settle()
     try require(OverlayPreview.textHeight(in: root) == minimum, "Deleting back to Tasks must restore the two-line minimum")
     print("Note height checks passed (trailing fragments counted once, monotonic typing, body styling, deletion, document frame).")
+}
+
+@MainActor
+private func checkCoalescedLongNoteLayout() async throws {
+    let editor = NoteEditorPanel()
+    let initial = "😀 lead\n" + String(repeating: "tail line\n", count: 2_400) + "# Suffix **bold**\n"
+    editor.present(destination: nil, isPinned: false, draft: initial, handlers: NoteEditorHandlers(
+        onDraft: { _ in }, onSubmit: { _ in }, onNew: { _ in }, onOpenAsNote: { _ in }, browseItems: { [] },
+        onBrowse: { _, _ in }, onTogglePin: { false }, onClose: {}, onError: { _ in }))
+    let panel = try currentPanel()
+    guard let root = panel.contentView,
+          let text = descendants(root).compactMap({ $0 as? NSTextView }).first(where: { $0.accessibilityLabel() == "Note text" }),
+          let manager = text.layoutManager, let container = text.textContainer,
+          let scroll = text.enclosingScrollView else { throw GalleryError("Long-note layout editor missing") }
+    let originalDocumentHeight = text.frame.height
+    let replacement = "a\nb\nc\n**inserted**\n# final\n"
+    let firstPlainLine = (text.string as NSString).range(of: "tail line\n")
+    text.insertText(replacement, replacementRange: firstPlainLine)
+    try await Task.sleep(for: .milliseconds(350))
+    let insertedSource = text.string as NSString
+    let insertedLabel = insertedSource.range(of: "inserted")
+    let insertedHeading = insertedSource.range(of: "# final")
+    guard insertedLabel.location != NSNotFound, insertedHeading.location != NSNotFound else {
+        throw GalleryError("Multi-line replacement text missing")
+    }
+    try require(text.textStorage?.attribute(.font, at: insertedLabel.location, effectiveRange: nil) as? NSFont == OverlayTheme.editorStrongFont,
+                "A lengthening multi-line replacement must restyle all inserted lines")
+    let insertedElement = text.textStorage?.attribute(MarkdownStyler.element, at: insertedHeading.location,
+                                                       effectiveRange: nil) as? MarkdownStyler.Element
+    try require(insertedElement?.range.location == insertedHeading.location,
+                "A lengthening multi-line replacement must keep heading metadata at its UTF-16 offset")
+
+    let insertedBlock = insertedSource.range(of: replacement)
+    guard insertedBlock.location != NSNotFound else { throw GalleryError("Multi-line replacement block missing") }
+    text.insertText("tail line\n", replacementRange: insertedBlock)
+    try await Task.sleep(for: .milliseconds(350))
+    let restoredSource = text.string as NSString
+    let suffixHeading = restoredSource.range(of: "# Suffix")
+    guard suffixHeading.location != NSNotFound else { throw GalleryError("Suffix heading missing after deletion") }
+    let suffixElement = text.textStorage?.attribute(MarkdownStyler.element, at: suffixHeading.location,
+                                                     effectiveRange: nil) as? MarkdownStyler.Element
+    try require(suffixElement?.range.location == suffixHeading.location,
+                "A shortening multi-line replacement must rebase following heading metadata")
+
+    let end = (text.string as NSString).length
+    text.setSelectedRange(NSRange(location: end, length: 0))
+    text.insertText(String(repeating: "tail extension\n", count: 30), replacementRange: text.selectedRange())
+    let newEnd = (text.string as NSString).length
+    text.setSelectedRange(NSRange(location: newEnd, length: 0))
+
+    // The editor coalesces accurate AppKit layout for up to 250 ms after continued edits.
+    try await Task.sleep(for: .milliseconds(350))
+    try await settle(until: { text.frame.height > originalDocumentHeight + 100 })
+    root.layoutSubtreeIfNeeded()
+    manager.ensureLayout(for: container)
+    let usedBottom = max(manager.usedRect(for: container).maxY, manager.extraLineFragmentRect.maxY) + text.textContainerOrigin.y
+    try require(scroll.hasVerticalScroller, "A 20k+ character quick note must remain scrollable after coalesced layout")
+    try require(text.frame.height > originalDocumentHeight + 100,
+                "The coalesced layout must extend the document frame to include the appended tail")
+    try require(usedBottom <= text.frame.height + 0.5,
+                "The accurate AppKit used rect and trailing caret line must fit inside the scroll document")
+    guard let beforeScrollCaret = OverlayPreview.layoutCaretRect(in: text) else { throw GalleryError("Long-note tail caret missing") }
+    try require(beforeScrollCaret.maxY <= text.frame.height + 0.5, "Tail caret must remain inside the measured document")
+    text.scrollRangeToVisible(NSRange(location: newEnd, length: 0))
+    scroll.reflectScrolledClipView(scroll.contentView)
+    try await Task.sleep(for: .milliseconds(30))
+    guard let visibleTailCaret = OverlayPreview.layoutCaretRect(in: text) else { throw GalleryError("Visible tail caret missing") }
+    try require(text.visibleRect.insetBy(dx: -1, dy: -1).intersects(visibleTailCaret),
+                "Scrolling to the end of a long note must make its caret reachable")
+    try require(editor.dismiss(), "Long-note panel dismissal failed")
+
+    let closingEditor = NoteEditorPanel()
+    closingEditor.present(destination: nil, isPinned: false, draft: "short", handlers: NoteEditorHandlers(
+        onDraft: { _ in }, onSubmit: { _ in }, onNew: { _ in }, onOpenAsNote: { _ in }, browseItems: { [] },
+        onBrowse: { _, _ in }, onTogglePin: { false }, onClose: {}, onError: { _ in }))
+    let closingPanel = try currentPanel()
+    guard let closingRoot = closingPanel.contentView,
+          let closingText = descendants(closingRoot).compactMap({ $0 as? NSTextView }).first(where: { $0.accessibilityLabel() == "Note text" }) else {
+        throw GalleryError("Pending-measure editor missing")
+    }
+    closingText.insertText(" " + String(repeating: "wider ", count: 80), replacementRange: closingText.selectedRange())
+    try require(closingEditor.dismiss(), "A valid draft must allow panel dismissal with measurement queued")
+    let dismissedFrame = closingPanel.frame
+    try require(!closingPanel.isVisible && closingPanel.contentView == nil, "Dismissal must release the panel content")
+    try await Task.sleep(for: .milliseconds(350))
+    try require(closingPanel.frame == dismissedFrame && !closingPanel.isVisible,
+                "A delayed measurement must not resize a closed panel")
+    print("Coalesced long-note checks passed (tail layout/scroll reachability and no delayed resize after dismissal).")
 }
 
 @MainActor
