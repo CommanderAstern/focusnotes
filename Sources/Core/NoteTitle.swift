@@ -32,7 +32,18 @@ public enum NoteTitle {
             stem.removeFirst()
             stem = stem.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        stem = String(stem.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+        // macOS limits a filename component to 255 UTF-8 bytes. Leave room for
+        // `.md` and a collision suffix, in addition to the display-length cap.
+        var bounded = ""
+        for character in stem.prefix(120) {
+            let piece = String(character)
+            guard bounded.utf8.count + piece.utf8.count <= 220 else { break }
+            bounded += piece
+        }
+        // A single grapheme may contain hundreds of combining marks. Splitting
+        // it can produce a Unicode sequence the filesystem refuses even within
+        // its byte limit, so the usual Untitled fallback handles that case.
+        stem = bounded.trimmingCharacters(in: .whitespacesAndNewlines)
         return stem.isEmpty ? "Untitled" : stem
     }
 }

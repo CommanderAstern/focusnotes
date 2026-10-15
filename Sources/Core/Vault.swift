@@ -49,10 +49,7 @@ public struct Vault: Sendable {
         for directory in [root, sessionsURL, assetsURL] {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        if !fm.fileExists(atPath: inboxURL.path) {
-            try Data(CaptureFormat.noteHeader(title: Self.inboxTitle).utf8)
-                .write(to: inboxURL, options: .withoutOverwriting)
-        }
+        try NoteFile.prepareInbox(Data(CaptureFormat.noteHeader(title: Self.inboxTitle).utf8), in: root)
     }
 
     /// Lists `*.md` files directly in the root and in `Sessions/`. Hidden files are skipped.

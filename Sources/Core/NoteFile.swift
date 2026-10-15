@@ -5,6 +5,39 @@ import Foundation
 enum NoteFile {
     private static let attempts = 4
 
+    /// Inbox is app-managed: migrate legacy broad modes without following a
+    /// symlink or changing a hard-linked file outside the vault.
+    static func prepareInbox(_ data: Data, in root: URL) throws {
+        let directory = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw posixError() }
+        defer { close(directory) }
+        var created = true
+        var descriptor = openat(directory, Vault.inboxFileName, O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if descriptor < 0, errno == EEXIST {
+            created = false
+            descriptor = openat(directory, Vault.inboxFileName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw posixError() }
+        try withLockedDescriptor(descriptor) {
+            var attributes = stat()
+            guard fstat(descriptor, &attributes) == 0 else { throw posixError() }
+            guard attributes.st_mode & S_IFMT == S_IFREG, attributes.st_uid == getuid(), attributes.st_nlink == 1 else {
+                throw POSIXError(.EPERM)
+            }
+            let privateMode = attributes.st_mode & 0o700
+            if attributes.st_mode & 0o7777 != privateMode {
+                guard fchmod(descriptor, privateMode) == 0 else { throw posixError() }
+            }
+            if created { try writeAll(data, to: descriptor) }
+            // The directory descriptor anchors both open operations. A rename or
+            // replacement during preparation must not be reported as success.
+            var current = stat()
+            guard fstatat(directory, Vault.inboxFileName, &current, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixError() }
+            guard current.st_dev == attributes.st_dev, current.st_ino == attributes.st_ino,
+                  try isCurrent(directory, at: root) else { throw POSIXError(.EAGAIN) }
+        }
+    }
+
     static func create(_ data: Data, at url: URL) throws {
         for _ in 0..<attempts {
             let descriptor = open(url.path, O_RDWR | O_APPEND | O_CREAT | O_EXCL, 0o600)

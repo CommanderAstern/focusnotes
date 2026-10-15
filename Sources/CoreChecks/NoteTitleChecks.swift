@@ -1,4 +1,5 @@
 import Core
+import Foundation
 
 func checkNoteTitle() throws {
     try require(
@@ -29,5 +30,17 @@ func checkNoteTitle() throws {
     try require(NoteTitle.fileStem(for: "..") == "Untitled", "a dots-only title should become Untitled")
     let longStem = NoteTitle.fileStem(for: String(repeating: "a", count: 200))
     try require(longStem.count == 120, "fileStem should truncate to 120 characters, got \(longStem.count)")
+    let root = try checkMakeDirectory("unicode-titles")
+    defer { checkRemoveDirectory(root) }
+    let vault = Vault(root: root)
+    for title in [String(repeating: "👨‍👩‍👧‍👦", count: 40), "a" + String(repeating: "\u{0301}", count: 500)] {
+        let stem = NoteTitle.fileStem(for: title)
+        try require(!stem.isEmpty && stem.utf8.count <= 220, "Unicode filename should fit the byte budget")
+        let first = vault.uniqueNoteURL(forTitle: title)
+        try checkWrite("# Unicode\n", to: first)
+        let second = vault.uniqueNoteURL(forTitle: title)
+        try require(first != second && second.lastPathComponent.utf8.count <= 255, "Unicode title should allow collision suffixes")
+        try checkWrite("# Unicode 2\n", to: second)
+    }
     print("NoteTitle checks passed.")
 }
