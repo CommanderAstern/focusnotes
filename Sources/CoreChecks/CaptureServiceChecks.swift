@@ -102,5 +102,50 @@ func checkCaptureService() async throws {
                 "replaying a prepared capture must not duplicate its marker")
     let parsedRetry = NoteParser.parse(contents: retryText, notePath: "Retry Destination.md", titleFallback: "", calendar: calendar)
     try require(parsedRetry.blocks.first?.createdAt == now, "retry must preserve the original timestamp")
+    try await checkDirectCaptureMethodsRejectLinks(base: base, calendar: calendar, now: now, png: png)
     print("CaptureService checks passed (including fixed-destination, idempotent retries).")
+}
+
+private func checkDirectCaptureMethodsRejectLinks(base: URL, calendar: Calendar, now: Date, png: Data) async throws {
+    let fm = FileManager.default
+    let textRoot = base.appendingPathComponent("DirectTextVault", isDirectory: true)
+    try fm.createDirectory(at: textRoot, withIntermediateDirectories: true)
+    let outsideNote = base.appendingPathComponent("direct-outside.md")
+    try checkWrite("outside text\n", to: outsideNote)
+    let textVault = Vault(root: textRoot)
+    try fm.createSymbolicLink(at: textVault.inboxURL, withDestinationURL: outsideNote)
+    let textSessions = SessionStore(stateDirectory: base.appendingPathComponent("DirectTextState", isDirectory: true),
+                                    vault: textVault, calendar: calendar, now: { now })
+    let textWriter = NoteWriter(vault: textVault, calendar: calendar)
+    let textService = CaptureService(vault: textVault, sessions: textSessions, writer: textWriter, now: { now })
+    do {
+        _ = try await textService.saveText("must not escape", source: CaptureSource(), heading: nil)
+        throw CheckFailure.failed("direct saveText must reject a linked Inbox.md")
+    } catch is CheckFailure { throw CheckFailure.failed("direct saveText unexpectedly accepted a linked Inbox.md") }
+    catch {}
+    let outsideText = try checkRead(outsideNote)
+    try require(outsideText == "outside text\n", "direct saveText changed the Inbox symlink target")
+
+    let imageRoot = base.appendingPathComponent("DirectImageVault", isDirectory: true)
+    try fm.createDirectory(at: imageRoot, withIntermediateDirectories: true)
+    let outsideAssets = base.appendingPathComponent("direct-assets", isDirectory: true)
+    try fm.createDirectory(at: outsideAssets, withIntermediateDirectories: true)
+    let imageVault = Vault(root: imageRoot)
+    try fm.createSymbolicLink(at: imageVault.assetsURL, withDestinationURL: outsideAssets)
+    let imageSessions = SessionStore(stateDirectory: base.appendingPathComponent("DirectImageState", isDirectory: true),
+                                     vault: imageVault, calendar: calendar, now: { now })
+    let imageWriter = NoteWriter(vault: imageVault, calendar: calendar)
+    let imageService = CaptureService(vault: imageVault, sessions: imageSessions, writer: imageWriter, now: { now })
+    do {
+        _ = try await imageService.saveImage(png: png, source: CaptureSource(), heading: nil)
+        throw CheckFailure.failed("direct saveImage must reject a linked assets directory")
+    } catch is CheckFailure { throw CheckFailure.failed("direct saveImage unexpectedly accepted a linked assets directory") }
+    catch {}
+    do {
+        _ = try await imageWriter.saveImage(png: png, createdAt: now)
+        throw CheckFailure.failed("direct NoteWriter.saveImage must reject a linked assets directory")
+    } catch is CheckFailure { throw CheckFailure.failed("direct NoteWriter.saveImage unexpectedly accepted a linked assets directory") }
+    catch {}
+    let outsideAssetNames = try fm.contentsOfDirectory(atPath: outsideAssets.path)
+    try require(outsideAssetNames.isEmpty, "image writes through a linked assets directory created an outside file")
 }

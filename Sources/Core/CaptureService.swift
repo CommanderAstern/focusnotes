@@ -91,7 +91,7 @@ public actor CaptureService {
     /// Saves an existing identity to its fixed destination without re-routing. Replaying
     /// after an append succeeded but journal cleanup failed does not add another block.
     public func save(_ prepared: PreparedCapture, png: Data? = nil) async throws -> SavedCapture {
-        guard vault.relativePath(of: prepared.destination.url) != nil else { throw CocoaError(.fileWriteInvalidFileName) }
+        _ = try vault.writePath(of: prepared.destination.url)
         if prepared.createsNote == true { preparedNoteURLs.insert(prepared.destination.url) }
         try vault.prepare()
         try await writer.appendIfMissing(prepared.capture, to: prepared.destination, png: png, noteMarkerIsIdentity: prepared.createsNote == true)

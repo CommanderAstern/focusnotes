@@ -201,7 +201,13 @@ func checkSearchIndex() async throws {
     }
     try await checkIndexRankingAndSharedAssets()
     try await checkOCRFingerprintRace()
+    try await checkIndexRejectsLinkedManagedReads()
     print("SearchIndex checks passed.")
+}
+
+private func checkIndexOperation<T>(_ label: String, operation: () async throws -> T) async throws -> T {
+    do { return try await operation() }
+    catch { throw CheckFailure.failed("\(label): \(error)") }
 }
 
 private func checkIndexRankingAndSharedAssets() async throws {
@@ -238,7 +244,10 @@ private func checkIndexRankingAndSharedAssets() async throws {
     try require(one.first?.captureID == titleID && one.count == 1, "search should respect its limit after ranking")
     let missing = try await index.assetsMissingText()
     try require(missing == [assetPath], "shared asset backfill paths should be deduplicated")
-    try await index.setImageText(assetPath: assetPath, text: "\u{02}café\u{03} sharedocr", fingerprint: SearchIndex.imageFingerprint(try Data(contentsOf: vault.root.appendingPathComponent(assetPath))))
+    guard let imageSnapshot = try vault.fileSnapshot(relativePath: assetPath), let imageData = imageSnapshot.contents else {
+        throw CheckFailure.failed("ranking fixture could not snapshot image bytes at \(assetPath)")
+    }
+    try await index.setImageText(assetPath: assetPath, text: "\u{02}café\u{03} sharedocr", fingerprint: SearchIndex.imageFingerprint(imageData))
     let shared = try await index.search("sharedocr")
     try require(shared.count == 2 && shared.allSatisfy { hit in hit.snippetMatches.map { String(hit.snippet[$0]) } == ["sharedocr"] }, "OCR should update every block referencing the same asset")
     let unicode = try await index.search("cafe")
@@ -321,29 +330,151 @@ private func checkOCRFingerprintRace() async throws {
     let url = vault.root.appendingPathComponent(path)
     let original = Data([1, 2, 3, 4])
     let replacement = Data([4, 3, 2, 1])
+    let modified = checkDate(2026, 10, 13, 10, 0)
     try original.write(to: url)
-    let modified = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as! Date
+    try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+    guard let originalSnapshot = try vault.fileSnapshot(relativePath: path) else {
+        throw CheckFailure.failed("OCR race fixture could not snapshot image A")
+    }
+    try require(originalSnapshot.contents == original, "OCR race fixture should begin with image A bytes")
     let writer = NoteWriter(vault: vault, calendar: calendar)
     let capture = Capture(id: UUID(), createdAt: checkDate(2026, 10, 13, 10, 0), content: .image(assetPath: path), source: CaptureSource())
     try await writer.append(capture, to: vault.inboxURL, title: Vault.inboxTitle)
     let index = try SearchIndex(vault: vault, databaseURL: base.appendingPathComponent("index.sqlite"), calendar: calendar)
-    _ = try await index.sync()
+    _ = try await checkIndexOperation("OCR race sync") { try await index.sync() }
     let originalFingerprint = SearchIndex.imageFingerprint(original)
-    try await index.setImageText(assetPath: path, text: "originalocr", fingerprint: originalFingerprint)
+    _ = try await checkIndexOperation("OCR race initial store \(path)") {
+        try await index.setImageText(assetPath: path, text: "originalocr", fingerprint: originalFingerprint)
+    }
     // Replace during OCR, even preserving the old size and modification time.
     try replacement.write(to: url, options: .atomic)
     try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
-    let stored = try await index.setImageText(assetPath: path, text: "staleocr", fingerprint: originalFingerprint)
+    guard let replacementSnapshot = try vault.fileSnapshot(relativePath: path) else {
+        throw CheckFailure.failed("OCR race fixture could not snapshot replacement image B")
+    }
+    try require(replacementSnapshot.contents == replacement &&
+                replacementSnapshot.size == originalSnapshot.size &&
+                replacementSnapshot.modifiedSeconds == originalSnapshot.modifiedSeconds &&
+                replacementSnapshot.modifiedNanoseconds == originalSnapshot.modifiedNanoseconds &&
+                SearchIndex.imageFingerprint(replacement) != SearchIndex.imageFingerprint(original),
+                "OCR race fixture must preserve exact descriptor mtime/size while changing its digest")
+    let stored = try await checkIndexOperation("OCR race stale store \(path)") {
+        try await index.setImageText(assetPath: path, text: "staleocr", fingerprint: originalFingerprint)
+    }
     let staleHits = try await index.search("staleocr")
-    let noteOnlyScan = try await index.assetsMissingText(recheckingAssetPaths: [])
-    let changedPathScan = try await index.assetsMissingText(recheckingAssetPaths: [path])
-    let missing = try await index.assetsMissingText()
+    let noteOnlyScan = try await checkIndexOperation("OCR race note-only scan \(path)") {
+        try await index.assetsMissingText(recheckingAssetPaths: [])
+    }
+    let changedPathScan = try await checkIndexOperation("OCR race changed-path scan \(path)") {
+        try await index.assetsMissingText(recheckingAssetPaths: [path])
+    }
+    let missing = try await checkIndexOperation("OCR race full scan \(path)") { try await index.assetsMissingText() }
     try require(!stored && staleHits.isEmpty && noteOnlyScan.isEmpty && changedPathScan == [path] && missing == [path],
-                "Same-metadata replacement must be checked for changed paths and full scans, while note-only scans skip its digest")
-    let replacementStored = try await index.setImageText(assetPath: path, text: "replacementocr", fingerprint: SearchIndex.imageFingerprint(replacement))
+                "Same-metadata replacement must be checked for changed paths and full scans, while note-only scans skip its digest (stored: \(stored), stale hits: \(staleHits.count), note-only: \(noteOnlyScan), changed paths: \(changedPathScan), full scan: \(missing))")
+    let replacementStored = try await checkIndexOperation("OCR race replacement store \(path)") {
+        try await index.setImageText(assetPath: path, text: "replacementocr", fingerprint: SearchIndex.imageFingerprint(replacement))
+    }
     let currentHits = try await index.search("replacementocr")
-    let currentChangedPathScan = try await index.assetsMissingText(recheckingAssetPaths: [path])
-    let currentMissing = try await index.assetsMissingText()
+    let currentChangedPathScan = try await checkIndexOperation("OCR race current changed-path scan \(path)") {
+        try await index.assetsMissingText(recheckingAssetPaths: [path])
+    }
+    let currentMissing = try await checkIndexOperation("OCR race current full scan \(path)") { try await index.assetsMissingText() }
     try require(replacementStored && currentHits.count == 1 && currentChangedPathScan.isEmpty && currentMissing.isEmpty,
                 "next OCR pass should store only image B's text")
+}
+
+private func checkIndexRejectsLinkedManagedReads() async throws {
+    let base = try checkMakeDirectory("index-linked-reads")
+    defer { checkRemoveDirectory(base) }
+    let vault = Vault(root: base.appendingPathComponent("Vault"))
+    try vault.prepare()
+
+    let outsideNote = base.appendingPathComponent("outside.md")
+    try checkWrite("# External Note\noutside-note-secret\n", to: outsideNote)
+    let symlinkNote = vault.root.appendingPathComponent("Outside symlink.md")
+    let hardlinkNote = vault.root.appendingPathComponent("Outside hardlink.md")
+    try FileManager.default.createSymbolicLink(at: symlinkNote, withDestinationURL: outsideNote)
+    try FileManager.default.linkItem(at: outsideNote, to: hardlinkNote)
+    let listed = try vault.listNotes().map(\.url.lastPathComponent)
+    try require(!listed.contains(symlinkNote.lastPathComponent) && !listed.contains(hardlinkNote.lastPathComponent),
+                "note listing must not expose linked outside content")
+
+    let outsideAsset = base.appendingPathComponent("outside.png")
+    let outsideAssetBytes = Data([9, 8, 7, 6])
+    try outsideAssetBytes.write(to: outsideAsset)
+    let symlinkAssetPath = "assets/outside-symlink.png"
+    let hardlinkAssetPath = "assets/outside-hardlink.png"
+    let assetPaths = [symlinkAssetPath, hardlinkAssetPath]
+    let sharedModificationDate = checkDate(2026, 10, 13, 10, 0)
+    for path in assetPaths {
+        let url = vault.root.appendingPathComponent(path)
+        try outsideAssetBytes.write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: url.path)
+    }
+    let metadataOnly = try await checkIndexOperation("linked fixture metadata-only snapshot \(symlinkAssetPath)") {
+        try vault.fileSnapshot(relativePath: symlinkAssetPath, includingContents: false)
+    }
+    let withContents = try await checkIndexOperation("linked fixture full snapshot \(symlinkAssetPath)") {
+        try vault.fileSnapshot(relativePath: symlinkAssetPath)
+    }
+    try require(metadataOnly?.contents == nil && withContents?.contents == outsideAssetBytes,
+                "vault snapshots must let metadata-only scans avoid returning image bytes")
+
+    let writer = NoteWriter(vault: vault, calendar: checkCalendar())
+    for path in assetPaths {
+        try await writer.append(
+            Capture(id: UUID(), createdAt: checkDate(2026, 10, 13, 10, 0),
+                    content: .image(assetPath: path), source: CaptureSource()),
+            to: vault.inboxURL, title: Vault.inboxTitle
+        )
+    }
+    let index = try SearchIndex(vault: vault, databaseURL: base.appendingPathComponent("index.sqlite"), calendar: checkCalendar())
+    _ = try await index.sync()
+    for path in assetPaths {
+        let stored = try await index.setImageText(
+            assetPath: path, text: "validassetocr",
+            fingerprint: SearchIndex.imageFingerprint(outsideAssetBytes)
+        )
+        try require(stored, "ordinary vault assets should accept OCR for their exact bytes")
+        try FileManager.default.removeItem(at: vault.root.appendingPathComponent(path))
+    }
+    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: outsideAsset.path)
+    try FileManager.default.createSymbolicLink(
+        at: vault.root.appendingPathComponent(symlinkAssetPath), withDestinationURL: outsideAsset
+    )
+    try FileManager.default.linkItem(at: outsideAsset, to: vault.root.appendingPathComponent(hardlinkAssetPath))
+
+    let missing = try await checkIndexOperation("linked assets full OCR scan \(assetPaths)") {
+        try await index.assetsMissingText()
+    }
+    let changedLink = try await checkIndexOperation("linked asset changed-path OCR scan \(hardlinkAssetPath)") {
+        try await index.assetsMissingText(recheckingAssetPaths: [hardlinkAssetPath])
+    }
+    try require(Set(missing) == Set(assetPaths) && Set(changedLink) == Set(assetPaths),
+                "full and changed-path scans must reject same-metadata linked assets (full: \(missing), changed: \(changedLink), expected: \(assetPaths))")
+
+    for path in assetPaths {
+        do {
+            _ = try await index.setImageText(
+                assetPath: path, text: "readoutsideafterlinksecret",
+                fingerprint: SearchIndex.imageFingerprint(outsideAssetBytes)
+            )
+            throw CheckFailure.failed("setImageText read a linked outside asset at \(path)")
+        } catch is CheckFailure {
+            throw CheckFailure.failed("setImageText accepted a linked outside asset at \(path)")
+        } catch {}
+    }
+    for note in [symlinkNote, hardlinkNote] {
+        do {
+            try await index.reindex(note: note)
+            throw CheckFailure.failed("reindex read a linked outside note at \(note.lastPathComponent)")
+        } catch is CheckFailure {
+            throw CheckFailure.failed("reindex accepted a linked outside note at \(note.lastPathComponent)")
+        } catch {}
+    }
+
+    let leakedNote = try await index.search("outside-note-secret")
+    let leakedAsset = try await index.search("readoutsideafterlinksecret")
+    try require(leakedNote.isEmpty && leakedAsset.isEmpty,
+                "indexing linked notes or assets must not expose their outside contents")
 }

@@ -71,13 +71,17 @@ public actor SearchIndex {
         var updated = 0
         var unchanged = 0
         for ref in refs {
-            guard let path = vault.relativePath(of: ref.url) else { continue }
-            let fingerprint = try Self.fingerprint(ref.url)
-            let old = previous.removeValue(forKey: path)
-            if old == fingerprint {
+            guard let path = try? vault.writePath(of: ref.url) else { continue }
+            guard let metadata = try vault.fileSnapshot(relativePath: path, includingContents: false) else { continue }
+            let old = previous[path]
+            if old == Self.fingerprint(metadata) {
+                previous.removeValue(forKey: path)
                 unchanged += 1
             } else {
-                try index(note: ref.url, path: path, kind: ref.kind, fingerprint: fingerprint)
+                guard let snapshot = try vault.fileSnapshot(relativePath: path), let contents = snapshot.contents else { continue }
+                let fingerprint = Self.fingerprint(snapshot)
+                try index(contents: contents, path: path, kind: ref.kind, fingerprint: fingerprint)
+                previous.removeValue(forKey: path)
                 if old == nil { added += 1 } else { updated += 1 }
             }
         }
@@ -91,11 +95,14 @@ public actor SearchIndex {
     }
 
     public func reindex(note: URL) throws {
-        guard let path = vault.relativePath(of: note), note.pathExtension.lowercased() == "md" else {
+        guard let path = try? vault.writePath(of: note), note.pathExtension.lowercased() == "md" else {
             throw IndexError.invalidNote
         }
         let kind: NoteKind = path == Vault.inboxFileName ? .inbox : (path.hasPrefix("Sessions/") ? .session : .note)
-        try index(note: note, path: path, kind: kind, fingerprint: Self.fingerprint(note))
+        guard let snapshot = try vault.fileSnapshot(relativePath: path), let contents = snapshot.contents else {
+            throw IndexError.invalidNote
+        }
+        try index(contents: contents, path: path, kind: kind, fingerprint: Self.fingerprint(snapshot))
     }
 
     /// The fingerprint comes from the exact bytes OCR consumed, never a later file version.
@@ -105,9 +112,11 @@ public actor SearchIndex {
 
     @discardableResult
     public func setImageText(assetPath: String, text: String, fingerprint expected: String) throws -> Bool {
-        let url = try assetURL(assetPath)
-        let fingerprint = try Self.fingerprint(url)
-        guard Self.imageFingerprint(try Data(contentsOf: url)) == expected else { return false }
+        guard let snapshot = try vault.fileSnapshot(relativePath: assetPath), let contents = snapshot.contents else {
+            throw IndexError.invalidAsset
+        }
+        let fingerprint = Self.fingerprint(snapshot)
+        guard Self.imageFingerprint(contents) == expected else { return false }
         try database.transaction {
             try database.execute("""
                 INSERT INTO image_text(asset_path, mtime, size, fingerprint, text) VALUES (?, ?, ?, ?, ?)
@@ -132,11 +141,17 @@ public actor SearchIndex {
         var missing: [String] = []
         while try rows.step() {
             guard let path = rows.text(0) else { continue }
-            let current = try? Self.fingerprint(assetURL(path))
-            if rows.isNull(1) || current == nil || current != Fingerprint(mtime: rows.double(1), size: rows.int(2)) {
+            if rows.isNull(1) {
                 missing.append(path)
-            } else if recheckingAssetPaths.map({ $0.contains(path) }) ?? true {
-                let digest = try? Self.imageFingerprint(Data(contentsOf: assetURL(path)))
+                continue
+            }
+            let shouldRecheckDigest = recheckingAssetPaths.map { $0.contains(path) } ?? true
+            let current = try? vault.fileSnapshot(relativePath: path, includingContents: shouldRecheckDigest)
+            let currentFingerprint = current.map(Self.fingerprint)
+            if currentFingerprint == nil || currentFingerprint != Fingerprint(mtime: rows.double(1), size: rows.int(2)) {
+                missing.append(path)
+            } else if shouldRecheckDigest {
+                let digest = current?.contents.map(Self.imageFingerprint)
                 if digest == nil || digest != rows.text(3) { missing.append(path) }
             }
         }
@@ -274,24 +289,14 @@ public actor SearchIndex {
         case invalidNote, invalidAsset, invalidCache
     }
 
-    private static func fingerprint(_ url: URL) throws -> Fingerprint {
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let modified = attributes[.modificationDate] as? Date, let size = attributes[.size] as? NSNumber else {
-            throw CocoaError(.fileReadUnknown)
-        }
-        return Fingerprint(mtime: modified.timeIntervalSince1970, size: size.int64Value)
+    private static func fingerprint(_ snapshot: VaultFileSnapshot) -> Fingerprint {
+        Fingerprint(mtime: snapshot.modifiedAt.timeIntervalSince1970, size: snapshot.size)
     }
 
-    private func assetURL(_ path: String) throws -> URL {
-        let url = vault.url(forRelativePath: path)
-        guard !path.hasPrefix("/"), vault.relativePath(of: url) == path else { throw IndexError.invalidAsset }
-        return url
-    }
-
-    private func index(note: URL, path: String, kind: NoteKind, fingerprint: Fingerprint) throws {
+    private func index(contents: Data, path: String, kind: NoteKind, fingerprint: Fingerprint) throws {
         let parsed = NoteParser.parse(
-            contents: String(decoding: try Data(contentsOf: note), as: UTF8.self), notePath: path,
-            titleFallback: note.deletingPathExtension().lastPathComponent, calendar: calendar
+            contents: String(decoding: contents, as: UTF8.self), notePath: path,
+            titleFallback: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, calendar: calendar
         )
         try database.transaction {
             try database.execute("""

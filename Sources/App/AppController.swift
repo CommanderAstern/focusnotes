@@ -1,8 +1,16 @@
 import AppKit
 import CaptureKit
 import Core
+import Foundation
 import OverlayKit
 import os
+
+enum AppErrorLog {
+    /// A public diagnostic that excludes localized descriptions and associated values.
+    static func summary(_ error: Error) -> String {
+        "\(String(reflecting: type(of: error))) code=\((error as NSError).code)"
+    }
+}
 
 @MainActor
 final class ApplicationDelegate: NSObject, NSApplicationDelegate {
@@ -23,7 +31,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
                 await controller.start()
             } catch {
                 Logger(subsystem: AppInfo.bundleIdentifier, category: "startup")
-                    .error("Startup failed: \(String(describing: error), privacy: .public)")
+                    .error("Startup failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                 NSApp.terminate(nil)
             }
         }
@@ -137,7 +145,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
         startupIndexTask = indexing
         if !presentsUI { await indexing.value }
-        logger.notice("Ready: vault=\(pipeline.vault.root.path, privacy: .public) session=\(self.activeSession?.name ?? "none", privacy: .public)")
+        logger.notice("Ready: vault=\(pipeline.vault.root.path, privacy: .private) session=\(self.activeSession?.name ?? "none", privacy: .private)")
         return restored
     }
 
@@ -159,7 +167,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 logger.notice("Hotkey \(binding.0.displayString, privacy: .public): registered")
             case .failure(let error):
                 hotkeyFailures[binding.0] = error
-                logger.error("Hotkey \(binding.0.displayString, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.error("Hotkey \(binding.0.displayString, privacy: .public) failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
             }
         }
         refreshShortcutStatus()
@@ -404,7 +412,7 @@ final class AppController: NSObject, NSMenuDelegate {
             await actions?.value
             for persistence in recoveryPersistences.values {
                 do { try await persistence.value }
-                catch { logger.error("Shutdown recovery journal failed: \(String(describing: error), privacy: .public)") }
+                catch { logger.error("Shutdown recovery journal failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
             }
             guard !shutdownFinished else { return }
             _ = commitPending()
@@ -420,7 +428,7 @@ final class AppController: NSObject, NSMenuDelegate {
                         self?.showNoteSaveFeedback(saved, pinFailed: pinFailed)
                     }
                     preparedJobs.removeValue(forKey: id)
-                } catch { logger.error("Shutdown save retained in journal: \(String(describing: error), privacy: .public)") }
+                } catch { logger.error("Shutdown save retained in journal (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
             }
         }
         let task = Task { [self] in
@@ -463,7 +471,7 @@ final class AppController: NSObject, NSMenuDelegate {
             return try await pipeline.index.headingSuggestions(prefix: "", limit: Int.max)
                 .filter { !sessionsOnly || $0.kind == .session }
         } catch {
-            logger.error("Heading suggestions failed: \(String(describing: error), privacy: .public)")
+            logger.error("Heading suggestions failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
             return []
         }
     }
@@ -842,7 +850,7 @@ final class AppController: NSObject, NSMenuDelegate {
                     }
                     return [SearchSection(title: empty ? "Recent" : "Results", rows: rows)]
                 } catch {
-                    controller.logger.error("Search failed: \(String(describing: error), privacy: .public)")
+                    controller.logger.error("Search failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                     return [SearchSection(title: "Results", rows: [], errorMessage: "Search failed. Try again.")]
                 }
             }, actions: SearchActions(primary: { _ in }, open: { _ in }, reveal: { _ in }, onClose: { [weak controller] in
@@ -875,12 +883,14 @@ final class AppController: NSObject, NSMenuDelegate {
         case .image: .image
         case .loose, .note: .note
         }
-        let asset = hit.assetPath.flatMap { try? pipeline.assetURL($0) }
         let loader: (@MainActor () async -> NSImage?)?
-        if let asset {
+        if let assetPath = hit.assetPath {
             loader = {
-                guard let image = await AppMedia.thumbnail(at: asset), !Task.isCancelled else { return nil }
-                return NSImage(cgImage: image, size: .zero)
+                do {
+                    let data = try await self.pipeline.assetData(assetPath)
+                    guard let image = await AppMedia.thumbnail(pngData: data), !Task.isCancelled else { return nil }
+                    return NSImage(cgImage: image, size: .zero)
+                } catch { return nil }
             }
         } else { loader = nil }
         return SearchRow(id: id, title: hit.title, snippet: hit.snippet,
@@ -904,7 +914,8 @@ final class AppController: NSObject, NSMenuDelegate {
             do {
                 let item = NSPasteboardItem()
                 if hit.blockKind == .image, let path = hit.assetPath {
-                    let representations = try await AppMedia.imageRepresentations(at: pipeline.assetURL(path))
+                    let data = try await pipeline.assetData(path)
+                    let representations = try await AppMedia.imageRepresentations(pngData: data)
                     item.setData(representations.png, forType: .png)
                     item.setData(representations.tiff, forType: .tiff)
                 } else {
@@ -934,7 +945,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func report(_ error: Error, title: String) {
-        logger.error("\(title, privacy: .public): \(String(describing: error), privacy: .public)")
+        logger.error("\(title, privacy: .public) (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
         showToast(Toast(style: .warning, title: title))
     }
 

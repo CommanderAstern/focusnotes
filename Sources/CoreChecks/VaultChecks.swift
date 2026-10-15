@@ -1,4 +1,5 @@
 import Core
+import Darwin
 import Foundation
 
 func checkVault() throws {
@@ -62,7 +63,71 @@ func checkVault() throws {
         vault.uniqueNoteURL(forTitle: "Foo").lastPathComponent == "Foo 3.md",
         "a taken Foo 2.md should map to Foo 3.md"
     )
+    try checkUnsafeNoteListing()
+    try checkSelectedRootSymlink()
+    try checkRootAnchorAdoptsExternalCreation()
     print("Vault checks passed.")
+}
+
+private func checkUnsafeNoteListing() throws {
+    let base = try checkMakeDirectory("vault-listing-links")
+    defer { checkRemoveDirectory(base) }
+    let root = base.appendingPathComponent("Vault", isDirectory: true)
+    let vault = Vault(root: root)
+    try vault.prepare()
+    let outside = base.appendingPathComponent("outside.md")
+    try checkWrite("# Outside title\nprivate body\n", to: outside)
+    try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Symlink.md"), withDestinationURL: outside)
+    try FileManager.default.linkItem(at: outside, to: root.appendingPathComponent("Hardlink.md"))
+    let fifo = root.appendingPathComponent("Waiting.md")
+    try require(mkfifo(fifo.path, 0o600) == 0, "could not create FIFO fixture")
+
+    let names = try vault.listNotes().map(\.url.lastPathComponent)
+    let repeatedNames = try vault.listNotes().map(\.url.lastPathComponent)
+    try require(names == repeatedNames, "repeated descriptor-backed listings must return the same notes")
+    try require(!names.contains("Symlink.md"), "listNotes must skip symlink notes")
+    try require(!names.contains("Hardlink.md"), "listNotes must skip hard-linked notes")
+    try require(!names.contains("Waiting.md"), "listNotes must skip FIFOs without blocking")
+}
+
+private func checkSelectedRootSymlink() throws {
+    let base = try checkMakeDirectory("vault-root-symlink")
+    defer { checkRemoveDirectory(base) }
+    let target = base.appendingPathComponent("target", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    let alias = base.appendingPathComponent("alias", isDirectory: true)
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+    let vault = Vault(root: alias)
+    let targetVault = Vault(root: target)
+    try vault.prepare()
+    try require(vault.root.standardizedFileURL.path == targetVault.root.standardizedFileURL.path,
+                "Vault should resolve a user-selected root symlink once")
+    try require(FileManager.default.fileExists(atPath: target.appendingPathComponent("Inbox.md").path),
+                "a resolved vault root symlink should remain writable")
+}
+
+private func checkRootAnchorAdoptsExternalCreation() throws {
+    let base = try checkMakeDirectory("vault-root-created-later")
+    defer { checkRemoveDirectory(base) }
+    let root = base.appendingPathComponent("Vault", isDirectory: true)
+    let vault = Vault(root: root)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let emptyListing = try vault.listNotes()
+    try require(emptyListing.isEmpty, "an absent Sessions directory should be treated as an empty listing")
+    let sessionDirectory = vault.sessionsURL
+    try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+    let note = sessionDirectory.appendingPathComponent("External.md")
+    try checkWrite("# External\nbody\n", to: note)
+
+    guard let snapshot = try vault.fileSnapshot(relativePath: "Sessions/External.md"),
+          let contents = snapshot.contents else {
+        throw CheckFailure.failed("a root created after Vault initialization should be adopted for safe reads")
+    }
+    try require(String(decoding: contents, as: UTF8.self) == "# External\nbody\n",
+                "the adopted root snapshot returned wrong bytes")
+    let listed = try vault.listNotes()
+    try require(listed.contains { $0.title == "External" && $0.kind == .session },
+                "descriptor-backed listing should adopt an externally created root")
 }
 
 private func checkInboxLinks() throws {

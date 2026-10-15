@@ -121,8 +121,9 @@ extension AppController {
               textHit?.body == "selftestneedle full body\nSecond line for copying.",
               text.destination.title == "Demo Heading", image.destination.kind == .inbox,
               let asset = imageHit?.assetPath else { throw SelfTestFailure("Pipeline verification failed") }
-        let representations = try await AppMedia.imageRepresentations(at: pipeline.assetURL(asset))
-        let thumbnail = try await AppMedia.thumbnail(at: pipeline.assetURL(asset))
+        let assetData = try await pipeline.assetData(asset)
+        let representations = try await AppMedia.imageRepresentations(pngData: assetData)
+        let thumbnail = await AppMedia.thumbnail(pngData: assetData)
         guard !representations.tiff.isEmpty, representations.png == png, let thumbnail,
               max(thumbnail.width, thumbnail.height) == 72 else { throw SelfTestFailure("Image search representations failed") }
         guard let textHit, let imageHit else { throw SelfTestFailure("Fusion fixtures missing") }
@@ -338,7 +339,7 @@ extension AppController {
     }
 
     private func checkSemanticRetryRecovery() async throws {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("focusnotes-semantic-retry-\(UUID().uuidString)", isDirectory: true)
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("semantic-retry-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
         let vault = Vault(root: base.appendingPathComponent("Vault", isDirectory: true))
         try vault.prepare()
@@ -629,7 +630,7 @@ extension AppController {
         let reopened = try await CapturePipeline.open(vaultRoot: root, stateDirectory: state, calendar: pipeline.calendar)
         let restored = await AppController(pipeline: reopened, presentsUI: false).start()
         guard restored == 2, try await reopened.journal.recordURLs().isEmpty else { throw SelfTestFailure("Journal replay did not clear saved work") }
-        guard try Data(contentsOf: reopened.assetURL(imagePath)) == png else { throw SelfTestFailure("Retry retained a truncated image asset") }
+        guard try await reopened.assetData(imagePath) == png else { throw SelfTestFailure("Retry retained a truncated image asset") }
         for job in jobs {
             let hit = try await reopened.index.capture(id: job.prepared.capture.id)
             guard hit?.notePath == session.notePath else { throw SelfTestFailure("Replay re-routed a prepared capture") }

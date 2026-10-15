@@ -87,7 +87,73 @@ func checkNoteWriter() async throws {
     try await checkAppendCache(vault: vault, calendar: calendar, capture: capture)
     try await checkCachedSourceParsing(vault: vault, calendar: calendar, capture: capture)
     try await checkInPlaceEditBeforeAppend(vault: vault, calendar: calendar, capture: capture)
+    try await checkUnsafeNoteTargets(calendar: calendar, capture: capture)
     print("NoteWriter checks passed.")
+}
+
+private func checkUnsafeNoteTargets(calendar: Calendar, capture: Capture) async throws {
+    let base = try checkMakeDirectory("writer-links")
+    defer { checkRemoveDirectory(base) }
+    let root = base.appendingPathComponent("Vault", isDirectory: true)
+    let vault = Vault(root: root)
+    try vault.prepare()
+    let writer = NoteWriter(vault: vault, calendar: calendar)
+    let outside = base.appendingPathComponent("outside.md")
+    try checkWrite("outside bytes\n", to: outside)
+
+    let symlink = vault.root.appendingPathComponent("Linked.md")
+    try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outside)
+    do {
+        try await writer.append(capture, to: symlink, title: "Linked")
+        throw CheckFailure.failed("note appends must reject a symlink target")
+    } catch is CheckFailure { throw CheckFailure.failed("note symlink unexpectedly accepted") }
+    catch {}
+    let afterSymlink = try checkRead(outside)
+    try require(afterSymlink == "outside bytes\n", "a symlink note append changed the outside file")
+
+    try FileManager.default.removeItem(at: symlink)
+    let hardlink = vault.root.appendingPathComponent("Hardlinked.md")
+    try FileManager.default.linkItem(at: outside, to: hardlink)
+    do {
+        try await writer.append(capture, to: hardlink, title: "Hardlinked")
+        throw CheckFailure.failed("note appends must reject a hard-linked target")
+    } catch is CheckFailure { throw CheckFailure.failed("hard-linked note unexpectedly accepted") }
+    catch {}
+    let afterHardlink = try checkRead(outside)
+    try require(afterHardlink == "outside bytes\n", "a hard-linked note append changed the outside file")
+
+    let outsidePNG = base.appendingPathComponent("outside.png")
+    let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    try png.write(to: outsidePNG)
+    let linkedAsset = vault.assetsURL.appendingPathComponent("Linked.png")
+    try FileManager.default.createSymbolicLink(at: linkedAsset, withDestinationURL: outsidePNG)
+    var imageCapture = capture
+    imageCapture.id = UUID()
+    imageCapture.content = .image(assetPath: "assets/Linked.png")
+    do {
+        try await writer.appendIfMissing(imageCapture,
+                                         to: Destination(url: vault.root.appendingPathComponent("Linked asset.md"), title: "Linked asset", kind: .note),
+                                         png: png)
+        throw CheckFailure.failed("asset replay must reject a symlink target")
+    } catch is CheckFailure { throw CheckFailure.failed("symlink asset replay unexpectedly succeeded") }
+    catch {}
+    let afterAssetSymlink = try Data(contentsOf: outsidePNG)
+    try require(afterAssetSymlink == png, "asset replay through a symlink changed outside bytes")
+
+    try FileManager.default.removeItem(at: linkedAsset)
+    let hardlinkedAsset = vault.assetsURL.appendingPathComponent("Hardlinked.png")
+    try FileManager.default.linkItem(at: outsidePNG, to: hardlinkedAsset)
+    imageCapture.id = UUID()
+    imageCapture.content = .image(assetPath: "assets/Hardlinked.png")
+    do {
+        try await writer.appendIfMissing(imageCapture,
+                                         to: Destination(url: vault.root.appendingPathComponent("Hardlinked asset.md"), title: "Hardlinked asset", kind: .note),
+                                         png: png)
+        throw CheckFailure.failed("asset replay must reject a hard-linked target")
+    } catch is CheckFailure { throw CheckFailure.failed("hard-linked asset replay unexpectedly succeeded") }
+    catch {}
+    let afterAssetHardlink = try Data(contentsOf: outsidePNG)
+    try require(afterAssetHardlink == png, "asset replay through a hard link changed outside bytes")
 }
 
 private final class InPlaceSourceEditor: @unchecked Sendable {

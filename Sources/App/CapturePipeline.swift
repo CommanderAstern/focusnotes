@@ -104,7 +104,7 @@ struct CapturePipeline: Sendable {
                 try await index.setImageText(assetPath: asset, text: text, fingerprint: SearchIndex.imageFingerprint(png))
             }
         } catch {
-            logger.error("Capture saved; index update failed: \(String(describing: error), privacy: .public)")
+            logger.error("Capture saved; index update failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
         }
         if let deferred = job.deferredOCR, let png = job.png, case .image(let asset) = job.prepared.capture.content {
             Task.detached(priority: .utility) {
@@ -112,7 +112,7 @@ struct CapturePipeline: Sendable {
                 do {
                     try await index.setImageText(assetPath: asset, text: result.text, fingerprint: SearchIndex.imageFingerprint(png))
                     await semantic.schedule()
-                } catch { logger.error("Deferred OCR cache update failed: \(String(describing: error), privacy: .public)") }
+                } catch { logger.error("Deferred OCR cache update failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
             }
         }
         let pinFailed = try completeNoteSave(job, saved: saved, pinOnSave: pinOnSave)
@@ -132,7 +132,7 @@ struct CapturePipeline: Sendable {
             do { try pins.set(path, pinned: true) }
             catch {
                 pinFailed = true
-                logger.error("Couldn't pin note: \(String(describing: error), privacy: .public)")
+                logger.error("Couldn't pin note (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
             }
         }
         return pinFailed
@@ -151,14 +151,14 @@ struct CapturePipeline: Sendable {
                     _ = try await commit(job, onNoteSaved: onNoteSaved)
                     restored += 1
                 } catch {
-                    logger.error("Journal replay failed for \(url.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+                    logger.error("Journal replay failed for \(url.lastPathComponent, privacy: .private) (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                     if error is CaptureJournal.RecordError {
                         do { try await journal.quarantine(record: url) }
-                        catch { logger.error("Journal quarantine failed: \(String(describing: error), privacy: .public)") }
+                        catch { logger.error("Journal quarantine failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
                     }
                 }
             }
-        } catch { logger.error("Journal read failed: \(String(describing: error), privacy: .public)") }
+        } catch { logger.error("Journal read failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
         logger.notice("Journal replay: restored=\(restored)")
         return restored
     }
@@ -172,7 +172,7 @@ struct CapturePipeline: Sendable {
             logger.notice("Index sync: added=\(stats.added) updated=\(stats.updated) removed=\(stats.removed) unchanged=\(stats.unchanged)")
             await semantic.schedule()
         } catch {
-            logger.error("Index sync failed: \(String(describing: error), privacy: .public)")
+            logger.error("Index sync failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
         }
     }
 
@@ -184,23 +184,35 @@ struct CapturePipeline: Sendable {
             for path in try await index.assetsMissingText(recheckingAssetPaths: recheckingAssetPaths) {
                 guard !Task.isCancelled else { return }
                 do {
-                    let data = try Data(contentsOf: assetURL(path, vault: vault))
+                    let data = try assetData(path, vault: vault)
                     let fingerprint = SearchIndex.imageFingerprint(data)
                     let result = try await OCR.recognize(pngData: data)
                     guard !Task.isCancelled else { return }
                     try await index.setImageText(assetPath: path, text: result.text, fingerprint: fingerprint)
                 } catch {
-                    logger.error("OCR backfill failed for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+                    logger.error("OCR backfill failed for \(path, privacy: .private) (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                 }
             }
             await semantic.schedule()
         } catch {
-            logger.error("OCR backfill list failed: \(String(describing: error), privacy: .public)")
+            logger.error("OCR backfill list failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
         }
+    }
+
+    @concurrent
+    func assetData(_ path: String) async throws -> Data {
+        try Self.assetData(path, vault: vault)
     }
 
     func assetURL(_ path: String) throws -> URL {
         try Self.assetURL(path, vault: vault)
+    }
+
+    private static func assetData(_ path: String, vault: Vault) throws -> Data {
+        guard let snapshot = try vault.fileSnapshot(relativePath: path), let contents = snapshot.contents else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        return contents
     }
 
     private static func assetURL(_ path: String, vault: Vault) throws -> URL {
@@ -218,7 +230,7 @@ struct CapturePipeline: Sendable {
         let recognition = Task.detached(priority: .userInitiated) { () -> OCRResult? in
             do { return try await recognize(png) }
             catch {
-                logger.error("OCR failed; retaining image: \(String(describing: error), privacy: .public)")
+                logger.error("OCR failed; retaining image (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                 return nil
             }
         }

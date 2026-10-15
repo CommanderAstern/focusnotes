@@ -9,7 +9,12 @@ private func require(_ condition: @autoclosure () throws -> Bool, _ message: Str
 @MainActor
 private func currentPanel() throws -> OverlayPanel {
     try autoreleasepool {
-        guard let panel = NSApp.windows.compactMap({ $0 as? OverlayPanel }).first(where: { $0.isVisible && $0.canBecomeKey }) else {
+        let panels = NSApp.windows.compactMap { $0 as? OverlayPanel }.filter { $0.isVisible && $0.canBecomeKey }
+        // Sticky note panels may remain visible after losing key status. Synthetic input and
+        // assertions must follow the active panel, not NSApp.windows enumeration order.
+        let panel = panels.first(where: \.isKeyWindow)
+            ?? panels.max(by: { $0.windowNumber < $1.windowNumber })
+        guard let panel else {
             throw GalleryError("Interactive panel was not visible")
         }
         return panel

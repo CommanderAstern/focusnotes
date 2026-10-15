@@ -5,36 +5,254 @@ import Foundation
 enum NoteFile {
     private static let attempts = 4
 
+    private struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+
+        init(_ value: stat) {
+            device = value.st_dev
+            inode = value.st_ino
+        }
+    }
+
+    /// Keeps every directory descriptor in the path open so writes stay anchored
+    /// even if a path component is replaced while the operation is in progress.
+    private final class DirectoryChain {
+        let descriptors: [Int32]
+        let names: [String?]
+        let identities: [FileIdentity]
+
+        init(descriptors: [Int32], names: [String?], identities: [FileIdentity]) {
+            self.descriptors = descriptors
+            self.names = names
+            self.identities = identities
+        }
+
+        deinit {
+            for descriptor in descriptors.reversed() { close(descriptor) }
+        }
+
+        var descriptor: Int32 { descriptors[descriptors.count - 1] }
+    }
+
+    private struct FileLocation {
+        let directories: DirectoryChain
+        let name: String
+
+        var parentDescriptor: Int32 { directories.descriptor }
+    }
+
+    /// Creates the app-managed folders through directory descriptors. The
+    /// selected vault root is already symlink-resolved by Vault.init; links
+    /// beneath that root are rejected.
+    static func prepareManagedDirectory(_ relativePath: String, in root: VaultDirectoryAnchor) throws {
+        _ = try openDirectory(root: root, components: pathComponents(relativePath), create: true)
+    }
+
+    static func listManagedDirectoryNames(in root: VaultDirectoryAnchor, relativePath: String) throws -> [String] {
+        let components = relativePath.isEmpty ? [] : try pathComponents(relativePath)
+        let directories = try openDirectory(root: root, components: components, create: false)
+        // openat(".") creates an independent open-file description, so readdir
+        // does not advance the retained root or directory descriptor offsets.
+        let descriptor = openat(directories.descriptor, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw posixError() }
+        guard let stream = fdopendir(descriptor) else {
+            close(descriptor)
+            throw posixError()
+        }
+        defer { closedir(stream) }
+
+        var names: [String] = []
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                if errno != 0 { throw posixError() }
+                break
+            }
+            var value = entry.pointee
+            let capacity = MemoryLayout.size(ofValue: value.d_name)
+            let name = withUnsafePointer(to: &value.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }
+            }
+            if name != ".", name != ".." { names.append(name) }
+        }
+        guard try isCurrent(directories) else { throw POSIXError(.EAGAIN) }
+        return names
+    }
+
+    /// Reads only a bounded prefix from a regular, app-owned, single-link note.
+    /// O_NONBLOCK makes an attacker-created FIFO fail the type check without
+    /// hanging note enumeration.
+    static func readManagedPrefix(_ count: Int, in root: VaultDirectoryAnchor, relativePath: String) throws -> Data? {
+        let location = try openLocation(root: root, relativePath: relativePath)
+        guard try isCurrent(location.directories) else { return nil }
+        let descriptor = openat(location.parentDescriptor, location.name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw posixError()
+        }
+        defer { close(descriptor) }
+        _ = try validateManagedFile(descriptor)
+        guard try isCurrent(descriptor, at: location) else { return nil }
+        let reader = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        let data = try reader.read(upToCount: count) ?? Data()
+        guard try isCurrent(descriptor, at: location) else { return nil }
+        _ = try validateManagedFile(descriptor)
+        return data
+    }
+
+    static func readManagedSnapshot(in root: VaultDirectoryAnchor, relativePath: String,
+                                    includingContents: Bool) throws -> VaultFileSnapshot? {
+        let location = try openLocation(root: root, relativePath: relativePath)
+        guard try isCurrent(location.directories) else { return nil }
+        let descriptor = openat(location.parentDescriptor, location.name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw posixError()
+        }
+        defer { close(descriptor) }
+        let initialAttributes = try validateManagedFile(descriptor)
+        guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
+        let initial = try fingerprint(descriptor)
+        let contents = includingContents ? try readAll(descriptor) : nil
+        let finalAttributes = try validateManagedFile(descriptor)
+        guard try isCurrent(descriptor, at: location), try fingerprint(descriptor) == initial,
+              FileIdentity(initialAttributes) == FileIdentity(finalAttributes) else { throw POSIXError(.EAGAIN) }
+        return VaultFileSnapshot(contents: contents, attributes: finalAttributes)
+    }
+
+    private static func pathComponents(_ path: String) throws -> [String] {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0") else { throw POSIXError(.EPERM) }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw POSIXError(.EPERM)
+        }
+        return components
+    }
+
+    private static func openDirectory(root: VaultDirectoryAnchor, components: [String], create: Bool) throws -> DirectoryChain {
+        var descriptors = [try root.duplicateRoot(createIfMissing: create)]
+        var names: [String?] = [nil]
+        var identities: [FileIdentity] = []
+        var rootAttributes = stat()
+        guard fstat(descriptors[0], &rootAttributes) == 0 else { close(descriptors[0]); throw posixError() }
+        guard rootAttributes.st_mode & S_IFMT == S_IFDIR, rootAttributes.st_uid == getuid() else {
+            close(descriptors[0])
+            throw POSIXError(.EPERM)
+        }
+        identities.append(FileIdentity(rootAttributes))
+        do {
+            for component in components {
+                var next = openat(descriptors[descriptors.count - 1], component,
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                if next < 0, errno == ENOENT, create {
+                    if mkdirat(descriptors[descriptors.count - 1], component, 0o700) != 0, errno != EEXIST {
+                        throw posixError()
+                    }
+                    next = openat(descriptors[descriptors.count - 1], component,
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                }
+                guard next >= 0 else {
+                    throw posixError()
+                }
+                var attributes = stat()
+                guard fstat(next, &attributes) == 0 else { close(next); throw posixError() }
+                guard attributes.st_mode & S_IFMT == S_IFDIR else { close(next); throw POSIXError(.ENOTDIR) }
+                descriptors.append(next)
+                names.append(component)
+                identities.append(FileIdentity(attributes))
+            }
+
+            for descriptor in descriptors.dropFirst() {
+                var attributes = stat()
+                guard fstat(descriptor, &attributes) == 0 else { throw posixError() }
+                guard attributes.st_uid == getuid() else { throw POSIXError(.EPERM) }
+            }
+            let chain = DirectoryChain(descriptors: descriptors, names: names, identities: identities)
+            descriptors.removeAll()
+            guard try isCurrent(chain) else { throw POSIXError(.EAGAIN) }
+            return chain
+        } catch {
+            for descriptor in descriptors.reversed() { close(descriptor) }
+            throw error
+        }
+    }
+
+    private static func openLocation(root: VaultDirectoryAnchor, relativePath: String, createDirectories: Bool = false) throws -> FileLocation {
+        let components = try pathComponents(relativePath)
+        let directoryComponents = Array(components.dropLast())
+        let directories = try openDirectory(root: root, components: directoryComponents, create: createDirectories)
+        return FileLocation(directories: directories, name: components[components.count - 1])
+    }
+
+    private static func isCurrent(_ directories: DirectoryChain) throws -> Bool {
+        guard directories.descriptors.count == directories.names.count,
+              directories.descriptors.count == directories.identities.count else { return false }
+        for index in directories.descriptors.indices {
+            var opened = stat()
+            guard fstat(directories.descriptors[index], &opened) == 0 else { throw posixError() }
+            guard FileIdentity(opened) == directories.identities[index] else { return false }
+            if index == 0 { continue }
+            guard let name = directories.names[index] else { return false }
+            var current = stat()
+            guard fstatat(directories.descriptors[index - 1], name, &current, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if errno == ENOENT { return false }
+                throw posixError()
+            }
+            guard current.st_mode & S_IFMT == S_IFDIR, FileIdentity(current) == directories.identities[index] else { return false }
+        }
+        return true
+    }
+
+    private static func isCurrent(_ descriptor: Int32, at location: FileLocation) throws -> Bool {
+        guard try isCurrent(location.directories) else { return false }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0 else { throw posixError() }
+        var current = stat()
+        guard fstatat(location.parentDescriptor, location.name, &current, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return false }
+            throw posixError()
+        }
+        return current.st_mode & S_IFMT == S_IFREG && FileIdentity(opened) == FileIdentity(current)
+    }
+
+    private static func validateManagedFile(_ descriptor: Int32) throws -> stat {
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0 else { throw posixError() }
+        guard attributes.st_mode & S_IFMT == S_IFREG,
+              attributes.st_uid == getuid(), attributes.st_nlink == 1 else { throw POSIXError(.EPERM) }
+        return attributes
+    }
+
     /// Inbox is app-managed: migrate legacy broad modes without following a
     /// symlink or changing a hard-linked file outside the vault.
-    static func prepareInbox(_ data: Data, in root: URL) throws {
-        let directory = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard directory >= 0 else { throw posixError() }
-        defer { close(directory) }
+    static func prepareInbox(_ data: Data, in root: VaultDirectoryAnchor) throws {
+        let location = try openLocation(root: root, relativePath: Vault.inboxFileName)
+        guard try isCurrent(location.directories) else { throw POSIXError(.EAGAIN) }
         var created = true
-        var descriptor = openat(directory, Vault.inboxFileName, O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        var descriptor = openat(location.parentDescriptor, location.name,
+                                O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         if descriptor < 0, errno == EEXIST {
             created = false
-            descriptor = openat(directory, Vault.inboxFileName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            descriptor = openat(location.parentDescriptor, location.name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         }
         guard descriptor >= 0 else { throw posixError() }
         try withLockedDescriptor(descriptor) {
-            var attributes = stat()
-            guard fstat(descriptor, &attributes) == 0 else { throw posixError() }
-            guard attributes.st_mode & S_IFMT == S_IFREG, attributes.st_uid == getuid(), attributes.st_nlink == 1 else {
-                throw POSIXError(.EPERM)
-            }
+            let attributes = try validateManagedFile(descriptor)
+            guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
             let privateMode = attributes.st_mode & 0o700
             if attributes.st_mode & 0o7777 != privateMode {
                 guard fchmod(descriptor, privateMode) == 0 else { throw posixError() }
             }
-            if created { try writeAll(data, to: descriptor) }
+            if created {
+                _ = try validateManagedFile(descriptor)
+                guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
+                try writeAll(data, to: descriptor)
+            }
             // The directory descriptor anchors both open operations. A rename or
             // replacement during preparation must not be reported as success.
-            var current = stat()
-            guard fstatat(directory, Vault.inboxFileName, &current, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixError() }
-            guard current.st_dev == attributes.st_dev, current.st_ino == attributes.st_ino,
-                  try isCurrent(directory, at: root) else { throw POSIXError(.EAGAIN) }
+            _ = try validateManagedFile(descriptor)
+            guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
         }
     }
 
@@ -113,39 +331,56 @@ enum NoteFile {
         }
     }
 
-    static func create(_ data: Data, at url: URL) throws {
-        for _ in 0..<attempts {
-            let descriptor = open(url.path, O_RDWR | O_APPEND | O_CREAT | O_EXCL, 0o600)
-            guard descriptor >= 0 else {
-                if errno == EEXIST { return }
-                throw posixError()
+    static func create(_ data: Data, in root: VaultDirectoryAnchor, relativePath: String) throws {
+        let location = try openLocation(root: root, relativePath: relativePath)
+        guard try isCurrent(location.directories) else { throw POSIXError(.EAGAIN) }
+        var descriptor = openat(location.parentDescriptor, location.name,
+                                O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if descriptor < 0, errno == EEXIST {
+            descriptor = openat(location.parentDescriptor, location.name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            guard descriptor >= 0 else { throw posixError() }
+            try withLockedDescriptor(descriptor) {
+                _ = try validateManagedFile(descriptor)
+                guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
             }
-            let current = try withLockedDescriptor(descriptor) {
-                var attributes = stat()
-                guard fstat(descriptor, &attributes) == 0 else { throw posixError() }
-                if attributes.st_size == 0 { try writeAll(data, to: descriptor) }
-                return try isCurrent(descriptor, at: url)
-            }
-            if current { return }
+            return
         }
-        throw POSIXError(.EAGAIN)
+        guard descriptor >= 0 else { throw posixError() }
+        try withLockedDescriptor(descriptor) {
+            let attributes = try validateManagedFile(descriptor)
+            guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
+            if attributes.st_size == 0 {
+                _ = try validateManagedFile(descriptor)
+                guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
+                try writeAll(data, to: descriptor)
+            }
+            _ = try validateManagedFile(descriptor)
+            guard try isCurrent(descriptor, at: location) else { throw POSIXError(.EAGAIN) }
+        }
     }
 
-    static func append(block: String, header: String, to url: URL, cache: inout AppendCache, identityPrefix: String,
+    static func append(block: String, header: String, root: VaultDirectoryAnchor, relativePath: String, to url: URL, cache: inout AppendCache, identityPrefix: String,
                        unlessMarkerExists marker: String? = nil,
                        savedNoteMarker: String? = nil, sourceHeading: String? = nil, equivalentBlocks: [String] = [], calendar: Calendar = .current,
                        beforeWrite: (@Sendable (URL) -> Void)? = nil,
                        afterWrite: (@Sendable (URL) -> Void)? = nil) throws {
-        if savedNoteMarker != nil { try createCompleteNote(Data((header + block).utf8), at: url) }
+        if savedNoteMarker != nil { try createCompleteNote(Data((header + block).utf8), root: root, relativePath: relativePath) }
         let blockData = Data(block.utf8)
         for attempt in 0..<attempts {
-            var descriptor = open(url.path, O_RDWR | O_APPEND | O_CREAT | O_EXCL, 0o600)
-            if descriptor < 0, errno == EEXIST { descriptor = open(url.path, O_RDWR | O_APPEND) }
+            let location = try openLocation(root: root, relativePath: relativePath)
+            guard try isCurrent(location.directories) else { throw POSIXError(.EAGAIN) }
+            var descriptor = openat(location.parentDescriptor, location.name,
+                                    O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            if descriptor < 0, errno == EEXIST {
+                descriptor = openat(location.parentDescriptor, location.name,
+                                    O_RDWR | O_APPEND | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            }
             if descriptor < 0, errno == ENOENT { continue }
             guard descriptor >= 0 else { throw posixError() }
             let current = try withLockedDescriptor(descriptor) {
                 // Inspect the locked inode, rather than a path an editor may have replaced.
                 let reader = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+                _ = try validateManagedFile(descriptor)
                 let initial = try fingerprint(descriptor)
                 let end = UInt64(initial.size)
                 var state = cache.take(url.path, matching: initial)
@@ -175,7 +410,7 @@ enum NoteFile {
                     // the user has subsequently edited its body in another app.
                     // A marker alone can be left by a short write. Only a whole block is saved.
                     if alreadySaved {
-                        let current = try isCurrent(descriptor, at: url)
+                        let current = try isCurrent(descriptor, at: location)
                         guard current, try fingerprint(descriptor) == initial else { return false }
                         if let state { cache.store(state, at: url.path) }
                         return true
@@ -197,11 +432,12 @@ enum NoteFile {
                 // Non-cooperating external editors can change the inode despite
                 // flock. Recompute both replay and source decisions on mutation.
                 beforeWrite?(url)
-                guard try fingerprint(descriptor) == initial else { return false }
+                guard try isCurrent(descriptor, at: location), try fingerprint(descriptor) == initial else { return false }
+                _ = try validateManagedFile(descriptor)
                 try writeAll(appended, to: descriptor)
                 let written = try fingerprint(descriptor)
                 afterWrite?(url)
-                let current = try isCurrent(descriptor, at: url)
+                let current = try isCurrent(descriptor, at: location)
                 if current, var state, written.size == initial.size + off_t(appended.count),
                    try fingerprint(descriptor) == written {
                     state.consume(appended, at: end, calendar: calendar)
@@ -215,6 +451,105 @@ enum NoteFile {
             // from current bytes, including editors that copied our append forward.
         }
         throw POSIXError(.EAGAIN)
+    }
+
+    /// Installs a new asset without following or replacing an existing entry.
+    /// Returns false when the generated name was already occupied.
+    static func createAsset(_ data: Data, in root: VaultDirectoryAnchor, relativePath: String) throws -> Bool {
+        let location = try openLocation(root: root, relativePath: relativePath, createDirectories: true)
+        return try installAsset(data, at: location, replacing: nil, expected: nil)
+    }
+
+    /// Replays a journaled image. Existing files are read through a validated
+    /// descriptor and incomplete content is replaced atomically in the same dir.
+    static func ensureAsset(_ data: Data, in root: VaultDirectoryAnchor, relativePath: String) throws {
+        for _ in 0..<attempts {
+            let location = try openLocation(root: root, relativePath: relativePath, createDirectories: true)
+            guard try isCurrent(location.directories) else { continue }
+            let descriptor = openat(location.parentDescriptor, location.name,
+                                    O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            if descriptor < 0, errno == ENOENT {
+                if try installAsset(data, at: location, replacing: nil, expected: nil) { return }
+                continue
+            }
+            guard descriptor >= 0 else { throw posixError() }
+            do {
+                try withLockedDescriptor(descriptor) {
+                    _ = try validateManagedFile(descriptor)
+                    let initial = try fingerprint(descriptor)
+                    let currentData = try readAll(descriptor)
+                    guard try isCurrent(descriptor, at: location), try fingerprint(descriptor) == initial else {
+                        throw POSIXError(.EAGAIN)
+                    }
+                    if currentData == data { return }
+                    _ = try installAsset(data, at: location, replacing: descriptor, expected: initial)
+                }
+                return
+            } catch let error as POSIXError where error.code == .EAGAIN {
+                continue
+            }
+        }
+        throw POSIXError(.EAGAIN)
+    }
+
+    private static func installAsset(_ data: Data, at location: FileLocation, replacing existing: Int32?, expected: Fingerprint?) throws -> Bool {
+        guard try isCurrent(location.directories) else { throw POSIXError(.EAGAIN) }
+        let temporaryName = ".asset-\(UUID().uuidString).pending"
+        let temporaryLocation = FileLocation(directories: location.directories, name: temporaryName)
+        let descriptor = openat(location.parentDescriptor, temporaryName,
+                                O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw posixError() }
+        var removeTemporary = true
+        defer {
+            if removeTemporary { _ = unlinkat(location.parentDescriptor, temporaryName, 0) }
+        }
+        return try withLockedDescriptor(descriptor) {
+            _ = try validateManagedFile(descriptor)
+            guard try isCurrent(location.directories), try isCurrent(descriptor, at: temporaryLocation) else {
+                throw POSIXError(.EAGAIN)
+            }
+            try writeAll(data, to: descriptor)
+            let temporaryAttributes = try validateManagedFile(descriptor)
+            let temporaryIdentity = FileIdentity(temporaryAttributes)
+            guard try isCurrent(descriptor, at: temporaryLocation), try isCurrent(location.directories) else {
+                throw POSIXError(.EAGAIN)
+            }
+
+            if let existing {
+                guard let expected, try isCurrent(existing, at: location), try fingerprint(existing) == expected else {
+                    throw POSIXError(.EAGAIN)
+                }
+                _ = try validateManagedFile(existing)
+                guard renameat(location.parentDescriptor, temporaryName, location.parentDescriptor, location.name) == 0 else {
+                    throw posixError()
+                }
+                removeTemporary = false
+            } else {
+                guard linkat(location.parentDescriptor, temporaryName, location.parentDescriptor, location.name, 0) == 0 else {
+                    if errno == EEXIST { return false }
+                    throw posixError()
+                }
+                guard unlinkat(location.parentDescriptor, temporaryName, 0) == 0 else { throw posixError() }
+                removeTemporary = false
+            }
+
+            let installed = openat(location.parentDescriptor, location.name,
+                                   O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            guard installed >= 0 else { throw posixError() }
+            defer { close(installed) }
+            let installedAttributes = try validateManagedFile(installed)
+            guard FileIdentity(installedAttributes) == temporaryIdentity,
+                  try isCurrent(installed, at: location), try isCurrent(location.directories) else {
+                throw POSIXError(.EAGAIN)
+            }
+            return true
+        }
+    }
+
+    private static func readAll(_ descriptor: Int32) throws -> Data {
+        let reader = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        try reader.seek(toOffset: 0)
+        return try reader.readToEnd() ?? Data()
     }
 
     private static func fingerprint(_ descriptor: Int32) throws -> Fingerprint {
@@ -256,15 +591,50 @@ enum NoteFile {
     /// Publish a new root note only after its entire header/body has been written
     /// under the lock. Thus a crash cannot expose a saved marker with a short body.
     /// link() installs without replacing a file that appeared since title routing.
-    private static func createCompleteNote(_ data: Data, at url: URL) throws {
-        if FileManager.default.fileExists(atPath: url.path) { return }
-        let temporary = url.deletingLastPathComponent().appendingPathComponent(".note-\(UUID().uuidString).pending")
-        let descriptor = open(temporary.path, O_RDWR | O_CREAT | O_EXCL, 0o600)
+    private static func createCompleteNote(_ data: Data, root: VaultDirectoryAnchor, relativePath: String) throws {
+        let location = try openLocation(root: root, relativePath: relativePath)
+        guard try isCurrent(location.directories) else { throw POSIXError(.EAGAIN) }
+        let existing = openat(location.parentDescriptor, location.name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        if existing >= 0 {
+            try withLockedDescriptor(existing) {
+                _ = try validateManagedFile(existing)
+                guard try isCurrent(existing, at: location) else { throw POSIXError(.EAGAIN) }
+            }
+            return
+        }
+        if errno != ENOENT { throw posixError() }
+
+        let temporaryName = ".note-\(UUID().uuidString).pending"
+        let temporaryLocation = FileLocation(directories: location.directories, name: temporaryName)
+        let descriptor = openat(location.parentDescriptor, temporaryName,
+                                O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw posixError() }
-        defer { unlink(temporary.path) }
+        var removeTemporary = true
+        defer {
+            if removeTemporary { _ = unlinkat(location.parentDescriptor, temporaryName, 0) }
+        }
         try withLockedDescriptor(descriptor) {
+            _ = try validateManagedFile(descriptor)
+            guard try isCurrent(location.directories), try isCurrent(descriptor, at: temporaryLocation) else {
+                throw POSIXError(.EAGAIN)
+            }
             try writeAll(data, to: descriptor)
-            guard link(temporary.path, url.path) == 0 || errno == EEXIST else { throw posixError() }
+            _ = try validateManagedFile(descriptor)
+            guard try isCurrent(descriptor, at: temporaryLocation), try isCurrent(location.directories) else {
+                throw POSIXError(.EAGAIN)
+            }
+            if linkat(location.parentDescriptor, temporaryName, location.parentDescriptor, location.name, 0) != 0 {
+                if errno != EEXIST { throw posixError() }
+            } else {
+                guard unlinkat(location.parentDescriptor, temporaryName, 0) == 0 else { throw posixError() }
+                removeTemporary = false
+                let installed = openat(location.parentDescriptor, location.name,
+                                       O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                guard installed >= 0 else { throw posixError() }
+                defer { close(installed) }
+                _ = try validateManagedFile(installed)
+                guard try isCurrent(installed, at: location) else { throw POSIXError(.EAGAIN) }
+            }
         }
     }
 
@@ -273,17 +643,6 @@ enum NoteFile {
         guard flock(descriptor, LOCK_EX) == 0 else { throw posixError() }
         defer { flock(descriptor, LOCK_UN) }
         return try operation()
-    }
-
-    private static func isCurrent(_ descriptor: Int32, at url: URL) throws -> Bool {
-        var opened = stat()
-        var current = stat()
-        guard fstat(descriptor, &opened) == 0 else { throw posixError() }
-        guard stat(url.path, &current) == 0 else {
-            if errno == ENOENT { return false }
-            throw posixError()
-        }
-        return opened.st_dev == current.st_dev && opened.st_ino == current.st_ino
     }
 
     private static func posixError() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }

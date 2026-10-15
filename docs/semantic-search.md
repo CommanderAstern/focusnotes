@@ -8,13 +8,26 @@ helper exits after 60 seconds idle (`--idle-seconds` overrides this for checks).
 Only the helper loads models/runtime. CPU worker spinning and runtime telemetry
 are disabled. Python and third-party Swift packages are absent at runtime.
 
+## Third-party terms
+
+Project-owned material is covered by the root [MIT License](../LICENSE). The
+third-party material has separate terms: the ONNX Runtime library is
+MIT-licensed, the pinned model export is marked Apache-2.0, and the vendored C
+API headers in `Sources/CORT` retain their MIT license. See
+[third-party notices](../THIRD_PARTY_NOTICES.md) for attribution and the
+locations of the applicable terms. Each license applies to its own component;
+the third-party terms do not replace the root project license.
+
 ## Artifacts
 
-The downloader pins [the ONNX export](https://huggingface.co/onnx-community/embeddinggemma-2-ONNX)
+The downloader pins [the ONNX export](https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/tree/daa72c51243991dfcaf9f9137d2c573d8f7790c0)
 to `daa72c51243991dfcaf9f9137d2c573d8f7790c0` and the official
 [ONNX Runtime 1.31.0 arm64 release](https://github.com/microsoft/onnxruntime/releases/tag/v1.31.0)
 (minimum macOS 14.0). Recorded SHA-256 values cover every artifact, including
-license/notices. Matching files are reused; downloads verify before replacement.
+the ONNX Runtime license and notices. Matching files are reused; downloads
+verify before replacement. The model license is Apache-2.0 at the pinned
+revision; its license and attribution are also recorded in the third-party
+notices.
 
 | Files | Precision | Bytes combined | Decimal MB |
 | --- | --- | ---: | ---: |
@@ -28,7 +41,7 @@ Q4 text was tested first: cosines 0.991523 / **0.988034** / 0.990065 failed the
 required 0.99 parity. Q8 text with Q4 vision passes and retains the smaller vision
 artifact. Q4 retains float32 activations throughout the CPU path; Q4F16 changes
 activation precision. Model IDs include the revision and mixed quantization.
-`CORT` contains the three required C API headers and MIT license; no runtime
+`CORT` contains the three required C API headers and its MIT license; no runtime
 library is linked at build time. Loading uses `dlopen` and `OrtGetApiBase`.
 
 ## Pipeline
@@ -163,7 +176,13 @@ Fixtures were generated once with [the official SentenceTransformer pipeline](ht
 Google revision `914f7f89142e33e77833254d9c9b90c3cef7303b`, float32 CPU inference
 and the default torchvision processor. Versions/provenance are in JSON.
 `generate-reference.py` is excluded from the Swift target and uses only the
-throwaway `build/embed-venv` with `HF_HOME=build/hf-cache`.
+throwaway `build/embed-venv` with `HF_HOME=build/hf-cache`. Its Python packages
+are pinned in `Sources/EmbedChecks/requirements-reference.txt` to the versions
+recorded in the fixtures; install them with
+`python3 -m venv build/embed-venv && build/embed-venv/bin/pip install -r Sources/EmbedChecks/requirements-reference.txt`.
+numpy is bounded (`>=1.26,<3`) rather than exact because its version was not
+recorded. Fixture regeneration is optional and these packages are not needed to
+build or run the app.
 
 All **16 tokenizer cases** pass, including Unicode, fallback, specials,
 whitespace and truncation. Text cosines: **0.999965 / 0.999930 / 0.999961**;
@@ -179,9 +198,20 @@ Idle exit with a 3-second override: **3.14 s**. New sources have zero compiler
 warnings; CLT emits missing developer framework/library search-path linker
 warnings unrelated to these sources.
 
-## Release dylib policy
+## Binary distribution checks
 
-Sign/notarize the helper and select a downloaded-runtime policy before release.
+The helper loads `libonnxruntime.dylib` from the user-selected models directory
+with `dlopen`. Immediately before loading, it hashes the file and compares it to
+a pinned SHA-256 in `Sources/EmbedKit/ONNXRuntime.swift` (kept in sync with
+`DYLIB_HASH` in `scripts/fetch-models.sh`); on mismatch or an unreadable file it
+refuses to load and reports "failed integrity check". This guards against a
+replaced or corrupted file, not against code already running as the same user.
+
+Binaries are distributed without Apple Developer ID signing or notarization, so
+macOS asks users to approve the first launch. See the dated
+[release checklist](release-checklist.md) for current verification status.
+
+If Apple signing is adopted later,
 [Apple library validation](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.disable-library-validation)
 normally requires Apple signing or the helper's Team ID. Options:
 

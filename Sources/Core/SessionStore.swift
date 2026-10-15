@@ -53,16 +53,17 @@ public actor SessionStore {
         try vault.prepare()
         let current = now()
         let stem = NoteTitle.fileStem(for: title)
-        let existing = try FileManager.default.contentsOfDirectory(at: vault.sessionsURL, includingPropertiesForKeys: [.isRegularFileKey])
-            .filter { $0.pathExtension.lowercased() == "md" && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+        let existing = try vault.listNotes().filter { $0.kind == .session }
             .sorted { left, right in
-                let leftExact = left.deletingPathExtension().lastPathComponent.caseInsensitiveCompare(stem) == .orderedSame
-                let rightExact = right.deletingPathExtension().lastPathComponent.caseInsensitiveCompare(stem) == .orderedSame
+                let leftStem = left.url.deletingPathExtension().lastPathComponent
+                let rightStem = right.url.deletingPathExtension().lastPathComponent
+                let leftExact = leftStem.caseInsensitiveCompare(stem) == .orderedSame
+                let rightExact = rightStem.caseInsensitiveCompare(stem) == .orderedSame
                 if leftExact != rightExact { return leftExact }
-                return left.lastPathComponent > right.lastPathComponent
+                return left.url.lastPathComponent > right.url.lastPathComponent
             }
-            .first {
-                let existingStem = $0.deletingPathExtension().lastPathComponent
+            .first { note in
+                let existingStem = note.url.deletingPathExtension().lastPathComponent
                 if existingStem.caseInsensitiveCompare(stem) == .orderedSame { return true }
                 // Legacy dated notes remain in place and can be resumed by their title.
                 let prefix = existingStem.prefix(11)
@@ -71,14 +72,23 @@ public actor SessionStore {
                 }) else { return false }
                 return String(existingStem.dropFirst(11)).caseInsensitiveCompare(stem) == .orderedSame
             }
-        let fileName = existing?.lastPathComponent ?? "\(stem).md"
-        let noteURL = vault.sessionsURL.appendingPathComponent(fileName)
-        let displayTitle = existing.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-            .flatMap { $0.components(separatedBy: "\n").first }
-            .flatMap { $0.hasPrefix("# ") ? NoteTitle.cleanTitle(String($0.dropFirst(2))) : nil }
+        let fileName = existing?.url.lastPathComponent ?? "\(stem).md"
+        var displayTitle: String?
+        if existing != nil {
+            let relativePath = "\(Vault.sessionsDirectoryName)/\(fileName)"
+            if let prefix = try NoteFile.readManagedPrefix(4096, in: vault.rootAnchor, relativePath: relativePath) {
+                let firstLineData = prefix.prefix { $0 != 0x0A }
+                var firstLine = String(decoding: firstLineData, as: UTF8.self)
+                if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
+                if firstLine.hasPrefix("# ") {
+                    displayTitle = NoteTitle.cleanTitle(String(firstLine.dropFirst(2)))
+                }
+            }
+        }
         let sessionTitle = displayTitle.flatMap { $0.isEmpty ? nil : $0 } ?? title
         beforeNoteWrite("\(Vault.sessionsDirectoryName)/\(fileName)")
-        try NoteFile.create(Data(CaptureFormat.noteHeader(title: title).utf8), at: noteURL)
+        try NoteFile.create(Data(CaptureFormat.noteHeader(title: title).utf8), in: vault.rootAnchor,
+                            relativePath: "\(Vault.sessionsDirectoryName)/\(fileName)")
 
         var started = Session(
             name: sessionTitle,

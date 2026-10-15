@@ -15,7 +15,13 @@ public enum EmbeddingFingerprint {
               let modified = attributes[.modificationDate] as? Date else {
             throw EmbeddingError.invalid("Missing image size or modification time")
         }
-        return digest(Data("\(url.path)\u{0}\(size.int64Value)\u{0}\(modified.timeIntervalSince1970.bitPattern)".utf8))
+        return image(path: url.path, size: size.int64Value, modifiedAt: modified)
+    }
+
+    /// Fingerprints metadata read from a validated descriptor while preserving
+    /// the path/size/mtime identity used by existing image vectors.
+    public static func image(path: String, size: Int64, modifiedAt: Date) -> String {
+        digest(Data("\(path)\u{0}\(size)\u{0}\(modifiedAt.timeIntervalSince1970.bitPattern)".utf8))
     }
 
     private static func digest(_ data: Data) -> String {

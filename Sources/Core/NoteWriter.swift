@@ -39,27 +39,32 @@ public actor NoteWriter {
 
     /// Appends one capture block to `note`. Creates the file with its header when it does not exist.
     public func append(_ capture: Capture, to note: URL, title: String) throws {
+        let relativePath = try vault.writePath(of: note)
         let block = CaptureFormat.block(
             for: capture,
-            noteRelativeDir: vault.relativeDirectory(of: note),
+            noteRelativeDir: vault.relativeDirectory(forWritePath: relativePath),
             calendar: calendar, includeSourceHeading: false
         )
         let header = CaptureFormat.noteHeader(title: title) + "\n"
 
-        try NoteFile.append(block: block, header: header, to: note, cache: &appendCache, identityPrefix: identityPrefix(capture), sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, beforeWrite: beforeAppend, afterWrite: afterAppend)
+        try NoteFile.append(block: block, header: header, root: vault.rootAnchor, relativePath: relativePath,
+                            to: note, cache: &appendCache, identityPrefix: identityPrefix(capture),
+                            sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block),
+                            calendar: calendar, beforeWrite: beforeAppend, afterWrite: afterAppend)
     }
 
     /// Retries keep the original marker and asset path, including after journal replay.
     public func appendIfMissing(_ capture: Capture, to destination: Destination, png: Data? = nil, noteMarkerIsIdentity: Bool = false) throws {
-        if case .image(let path) = capture.content, let png {
-            let url = vault.root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
-            guard vault.relativePath(of: url) == path else { throw CocoaError(.fileWriteInvalidFileName) }
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // The stable asset path survives retries. Replace an incomplete asset
-            // atomically; a previous failed write must not leave a truncated PNG.
-            if (try? Data(contentsOf: url)) != png { try png.write(to: url, options: .atomic) }
+        let notePath = try vault.writePath(of: destination.url)
+        if case .image(let path) = capture.content {
+            let assetPath = try checkedAssetPath(path)
+            if let png {
+                // The stable asset path survives retries. Replace incomplete
+                // content atomically after validating its descriptor and link count.
+                try NoteFile.ensureAsset(png, in: vault.rootAnchor, relativePath: assetPath)
+            }
         }
-        let block = CaptureFormat.block(for: capture, noteRelativeDir: vault.relativeDirectory(of: destination.url), calendar: calendar, includeSourceHeading: false)
+        let block = CaptureFormat.block(for: capture, noteRelativeDir: vault.relativeDirectory(forWritePath: notePath), calendar: calendar, includeSourceHeading: false)
         let prefix: String = switch capture.content {
         case .note: "note"
         case .subheading: "subheading"
@@ -68,7 +73,11 @@ public actor NoteWriter {
         let marker = "<!-- \(prefix):\(capture.id.uuidString.lowercased()) -->"
         let savedNoteMarker = noteMarkerIsIdentity && prefix == "note" ? String(block.prefix(while: { $0 != "\n" })) : nil
         try NoteFile.append(block: block, header: CaptureFormat.noteHeader(title: destination.title) + "\n",
-                            to: destination.url, cache: &appendCache, identityPrefix: identityPrefix(capture), unlessMarkerExists: marker, savedNoteMarker: savedNoteMarker, sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, beforeWrite: beforeAppend, afterWrite: afterAppend)
+                            root: vault.rootAnchor, relativePath: notePath, to: destination.url,
+                            cache: &appendCache, identityPrefix: identityPrefix(capture), unlessMarkerExists: marker,
+                            savedNoteMarker: savedNoteMarker, sourceHeading: headingSource(capture),
+                            equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar,
+                            beforeWrite: beforeAppend, afterWrite: afterAppend)
     }
 
     private func identityPrefix(_ capture: Capture) -> String {
@@ -99,19 +108,21 @@ public actor NoteWriter {
 
     /// Writes a PNG to `assets/{yyyy-MM-dd-HHmmss}-{4 hex}.png` and returns its vault-relative path.
     public func saveImage(png: Data, createdAt: Date) throws -> String {
-        let fm = FileManager.default
-        try fm.createDirectory(at: vault.assetsURL, withIntermediateDirectories: true)
         let stamp = CaptureFormat.localStamp(createdAt, pattern: "yyyy-MM-dd-HHmmss", calendar: calendar)
 
         while true {
             let suffix = String(format: "%04x", Int.random(in: 0...0xFFFF))
             let name = "\(stamp)-\(suffix).png"
-            let url = vault.assetsURL.appendingPathComponent(name)
-            if fm.fileExists(atPath: url.path) {
-                continue
-            }
-            try png.write(to: url, options: .atomic)
-            return "\(Vault.assetsDirectoryName)/\(name)"
+            let path = "\(Vault.assetsDirectoryName)/\(name)"
+            if try NoteFile.createAsset(png, in: vault.rootAnchor, relativePath: path) { return path }
         }
+    }
+
+    private func checkedAssetPath(_ path: String) throws -> String {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2, components[0] == Vault.assetsDirectoryName,
+              let name = components.last, name.hasSuffix(".png"), !name.hasPrefix("."),
+              !path.contains("\0") else { throw CocoaError(.fileWriteInvalidFileName) }
+        return path
     }
 }

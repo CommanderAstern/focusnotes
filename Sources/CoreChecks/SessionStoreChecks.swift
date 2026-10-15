@@ -93,5 +93,31 @@ func checkSessionStore() async throws {
     let retained = await store.current()
     try require(retained == kept && FileManager.default.fileExists(atPath: stateFile.path), "failed state deletion must keep the session active")
     try await store.end()
+    try await checkSessionStartRejectsLinkedDirectory(calendar: calendar, now: now)
     print("SessionStore checks passed.")
+}
+
+private func checkSessionStartRejectsLinkedDirectory(calendar: Calendar, now: Date) async throws {
+    let base = try checkMakeDirectory("session-link")
+    defer { checkRemoveDirectory(base) }
+    let fm = FileManager.default
+    let root = base.appendingPathComponent("Vault", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let outsideSessions = base.appendingPathComponent("outside-sessions", isDirectory: true)
+    try fm.createDirectory(at: outsideSessions, withIntermediateDirectories: true)
+    let vault = Vault(root: root)
+    try fm.createSymbolicLink(at: vault.sessionsURL, withDestinationURL: outsideSessions)
+    let store = SessionStore(stateDirectory: base.appendingPathComponent("State", isDirectory: true),
+                             vault: vault, calendar: calendar, now: { now })
+    do {
+        _ = try await store.start(name: "Escaped Session")
+        throw CheckFailure.failed("starting a session must reject a linked Sessions directory")
+    } catch is CheckFailure { throw CheckFailure.failed("session start unexpectedly accepted a linked Sessions directory") }
+    catch {}
+    let active = await store.current()
+    let outsideNames = try fm.contentsOfDirectory(atPath: outsideSessions.path)
+    try require(active == nil, "a failed linked-directory session start must not claim an active session")
+    try require(outsideNames.isEmpty, "session start through a linked Sessions directory created an outside note")
+    try require(!fm.fileExists(atPath: base.appendingPathComponent("State/session.json").path),
+                "a failed linked-directory session start must not persist active state")
 }

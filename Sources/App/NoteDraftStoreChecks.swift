@@ -26,7 +26,7 @@ private func waitForSignal(_ semaphore: DispatchSemaphore, timeout: DispatchTime
 
 @MainActor
 func checkNoteDraftStoreScheduling() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("focusnotes-draft-scheduler-\(UUID().uuidString)", isDirectory: true)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("draft-store-scheduler-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
 

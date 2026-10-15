@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 if [[ $# -gt 1 ]]; then
     printf 'Usage: %s [debug|release]\n' "$0" >&2
@@ -28,14 +28,22 @@ while IFS='=' read -r key value; do
     esac
 done < "$ROOT_DIR/Config/app.env"
 
-swift build -c "$CONFIGURATION"
-BIN_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
-
 APPNAME_LOWER="$(printf '%s' "$APPNAME" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed 's/[^a-z0-9-]/-/g')"
 BUNDLE_ID="$BUNDLE_PREFIX.$APPNAME_LOWER"
 BUNDLE_PATH="$ROOT_DIR/build/$APPNAME.app"
 CONTENTS_PATH="$BUNDLE_PATH/Contents"
 PLIST_PATH="$CONTENTS_PATH/Info.plist"
+
+# Validate the configured basename and both existing parent/target paths before
+# SwiftPM or the bundle cleanup can write outside the checkout.
+python3 "$SCRIPT_DIR/check-app-path.py" "$APPNAME" "$ROOT_DIR/build"
+python3 "$SCRIPT_DIR/check-app-path.py" "$APPNAME" "$ROOT_DIR" .build
+
+swift build -c "$CONFIGURATION"
+BIN_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
+
+python3 "$SCRIPT_DIR/check-app-path.py" "$APPNAME" "$ROOT_DIR/build"
+python3 "$SCRIPT_DIR/check-app-path.py" "$APPNAME" "$ROOT_DIR" .build
 
 python3 - "$BUNDLE_PATH" <<'PY'
 from pathlib import Path
@@ -73,17 +81,11 @@ plutil -insert LSUIElement -bool true "$PLIST_PATH"
 plutil -insert NSHighResolutionCapable -bool true "$PLIST_PATH"
 plutil -insert CFBundlePackageType -string APPL "$PLIST_PATH"
 
-# Local stable dev identity (see README) keeps macOS privacy permissions across rebuilds.
-DEV_SIGNING_DIR="$HOME/.config/local-dev-signing"
-DEV_KEYCHAIN="$DEV_SIGNING_DIR/dev-signing.keychain-db"
-
+# An explicit identity uses macOS's normal keychain selection and authorization.
+# Without one, keep builds usable with an ad-hoc signature.
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
     codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$CONTENTS_PATH/MacOS/EmbedHelper"
     codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$BUNDLE_PATH"
-elif [[ -f "$DEV_KEYCHAIN" && -f "$DEV_SIGNING_DIR/keychain.pass" ]]; then
-    security unlock-keychain -p "$(cat "$DEV_SIGNING_DIR/keychain.pass")" "$DEV_KEYCHAIN"
-    codesign --force --sign "Local Dev Code Signing" --keychain "$DEV_KEYCHAIN" --timestamp=none "$CONTENTS_PATH/MacOS/EmbedHelper"
-    codesign --force --sign "Local Dev Code Signing" --keychain "$DEV_KEYCHAIN" --timestamp=none "$BUNDLE_PATH"
 else
     codesign --force --sign - --timestamp=none "$CONTENTS_PATH/MacOS/EmbedHelper"
     codesign --force --sign - --timestamp=none "$BUNDLE_PATH"

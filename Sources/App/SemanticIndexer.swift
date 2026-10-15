@@ -102,7 +102,7 @@ actor SemanticIndexer {
             }
             catch {
                 if !Task.isCancelled && !(error is CancellationError) {
-                    logger.error("Embedding deferred: \(String(describing: error), privacy: .public)")
+                    logger.error("Embedding deferred (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                     failed = true
                 }
             }
@@ -228,20 +228,26 @@ actor SemanticIndexer {
             try Task.checkCancellation()
             guard await isEnabled(), Self.imagesAllowed else { return }
             guard let path = block.assetPath else { continue }
-            let url = vault.root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
-            guard !path.hasPrefix("/"), url.path.hasPrefix(vault.root.path + "/") else { continue }
             do {
-                let fingerprint = try EmbeddingFingerprint.image(at: url)
+                guard let metadata = try vault.fileSnapshot(relativePath: path, includingContents: false) else {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                let assetURL = vault.url(forRelativePath: path).standardizedFileURL
+                let fingerprint = EmbeddingFingerprint.image(path: assetURL.path, size: metadata.size, modifiedAt: metadata.modifiedAt)
                 guard fingerprints[block.key] != fingerprint else { continue }
-                let png = try Data(contentsOf: url)
+                guard let snapshot = try vault.fileSnapshot(relativePath: path), let png = snapshot.contents else {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                let snapshotFingerprint = EmbeddingFingerprint.image(path: assetURL.path, size: snapshot.size, modifiedAt: snapshot.modifiedAt)
+                guard fingerprints[block.key] != snapshotFingerprint else { continue }
                 let vector = try await client.embedImage(png)
                 try Task.checkCancellation()
-                try store.upsert(key: block.key, vector: vector, fingerprint: fingerprint)
+                try store.upsert(key: block.key, vector: vector, fingerprint: snapshotFingerprint)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 if Task.isCancelled { throw CancellationError() }
-                logger.error("Image embedding deferred for \(block.key, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.error("Image embedding deferred for \(block.key, privacy: .private) (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
                 if deferredImageError == nil { deferredImageError = error }
             }
         }
@@ -269,7 +275,7 @@ actor SemanticIndexer {
     func warm() async {
         guard enabled, !stopped else { return }
         do { _ = try await resources().0.ping() }
-        catch { logger.error("Helper warmup failed: \(String(describing: error), privacy: .public)") }
+        catch { logger.error("Helper warmup failed (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)") }
     }
 
     nonisolated func search(_ query: String, timeout: Duration = .milliseconds(350)) async -> SemanticHits {
@@ -304,7 +310,7 @@ actor SemanticIndexer {
         } catch is CancellationError {
             return SemanticHits()
         } catch {
-            logger.error("Semantic query skipped: \(String(describing: error), privacy: .public)")
+            logger.error("Semantic query skipped (\(AppErrorLog.summary(error), privacy: .public)): \(String(describing: error), privacy: .private)")
             return SemanticHits()
         }
     }

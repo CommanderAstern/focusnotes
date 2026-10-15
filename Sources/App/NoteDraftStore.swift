@@ -12,7 +12,7 @@ final class NoteDraftStore: @unchecked Sendable {
     private let lock = NSLock()
     /// Every draft mutation, including delayed editor writes, passes through this queue.
     /// A synchronous flush/clear is therefore ordered after an in-flight write.
-    private let persistenceQueue = DispatchQueue(label: "focusnotes.note-draft-persistence", qos: .utility)
+    private let persistenceQueue = DispatchQueue(label: "note-draft-persistence", qos: .utility)
     /// Preserve ordering between concurrent synchronous store/flush/clear callers as they enqueue.
     private let mutationLock = NSLock()
     private let scheduleLock = NSLock()

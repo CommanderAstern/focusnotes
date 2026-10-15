@@ -58,7 +58,7 @@ private actor InitialScanRecorder {
 
 @MainActor
 private func checkChangesDuringInitialScan() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("focusnotes-startup-\(UUID().uuidString)", isDirectory: true)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("app-startup-\(UUID().uuidString)", isDirectory: true)
     let vault = Vault(root: root)
     try vault.prepare()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -113,7 +113,7 @@ private func checkChangesDuringInitialScan() async throws {
 
 @MainActor
 private func checkDraftTerminationVeto() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("focusnotes-quit-\(UUID().uuidString)", isDirectory: true)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("app-quit-\(UUID().uuidString)", isDirectory: true)
     let pipeline = try await CapturePipeline.open(vaultRoot: root.appendingPathComponent("Vault"), stateDirectory: root.appendingPathComponent("State"), calendar: .current)
     let oldText = "Previously saved draft"
     let latestText = "Latest text that must survive a failed quit"

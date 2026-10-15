@@ -7,7 +7,19 @@ import UniformTypeIdentifiers
 enum AppMedia {
     @concurrent
     static func thumbnail(at url: URL) async -> CGImage? {
-        guard !Task.isCancelled, let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        guard !Task.isCancelled,
+              let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return thumbnail(source: source)
+    }
+
+    @concurrent
+    static func thumbnail(pngData: Data) async -> CGImage? {
+        guard !Task.isCancelled,
+              let source = CGImageSourceCreateWithData(pngData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return thumbnail(source: source)
+    }
+
+    private static func thumbnail(source: CGImageSource) -> CGImage? {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -19,6 +31,12 @@ enum AppMedia {
     @concurrent
     static func imageRepresentations(at url: URL) async throws -> (png: Data, tiff: Data) {
         let png = try Data(contentsOf: url)
+        return try await imageRepresentations(pngData: png)
+    }
+
+    @concurrent
+    static func imageRepresentations(pngData: Data) async throws -> (png: Data, tiff: Data) {
+        let png = pngData
         guard let source = CGImageSourceCreateWithData(png as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw CocoaError(.fileReadCorruptFile) }
         let output = NSMutableData()

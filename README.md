@@ -21,7 +21,10 @@ focusnotes never pulls you out of what you're doing:
   note goes to that topic's note until you end it.
 - **Plain Markdown.** Notes are ordinary `.md` files, compatible with Obsidian or any editor. There's no database
   you can't read and no lock-in.
-- **Local only.** Nothing leaves your Mac. Search, OCR and the optional semantic search all run on-device.
+- **On-device.** Captured text, screenshots, OCR, keyword search and optional
+  semantic search run on your Mac. The app does not upload note content.
+  Installing optional semantic models is an explicit download from Hugging Face
+  and GitHub; see [semantic search](docs/semantic-search.md).
 
 ## Features
 
@@ -54,18 +57,21 @@ closes it and keeps your draft.
 
 - macOS 14 Sonoma or later
 - A Swift 6.4 toolchain: a current Xcode, or the Command Line Tools
+- Python 3 for the bundle build, plus the macOS command-line tools used by the
+  scripts (`plutil`, `codesign`, `ditto`, `open`)
 - Apple silicon, only if you want semantic search
 
 ### Build and run
 
 ```bash
-git clone git@github.com:zerodoxxx/focusnotes.git
+git clone https://github.com/zerodoxxx/focusnotes.git
 cd focusnotes
 ./scripts/run-app.sh
 ```
 
-`run-app.sh` builds the app, quits any running copy, installs it to `/Applications/focusnotes.app` (or
-`~/Applications` if `/Applications` is not writable) and opens it. It then deletes the build artifacts (`.build` and
+`run-app.sh` builds the app, quits any running copy, replaces the installed copy
+at `/Applications/focusnotes.app` (or `~/Applications` if `/Applications` is not
+writable) and opens it. It then deletes the build artifacts (`.build` and
 the staged bundle), which can take several GB; set `KEEP_BUILD=1` to keep them for faster incremental rebuilds. A tray
 icon appears in the menu bar; there is no Dock icon. Use `./scripts/run-app.sh release` for an optimised build. To
 build without installing or launching, run `./scripts/build-app.sh`.
@@ -81,8 +87,8 @@ On first use, macOS asks for two permissions. Grant them in **System Settings â†
 
 The menu-bar menu shows the status of each under **Permissions**.
 
-> **Tip:** by default the app is signed ad hoc, so macOS may ask for permissions again after a rebuild. To keep them,
-> sign with your own certificate: `SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/run-app.sh`.
+> **Tip:** local builds are signed ad hoc by default, so macOS may ask for permissions again after a rebuild. To use
+> your own signing identity, pass it explicitly: `SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/run-app.sh`.
 
 ### Optional: semantic search
 
@@ -130,6 +136,15 @@ defaults write com.zerodoxxx.focusnotes vaultPath "~/Obsidian/Notes"
 App state (drafts, the search index and pending saves) lives in
 `~/Library/Application Support/com.zerodoxxx.focusnotes`.
 
+## License and contributing
+
+Project-owned files are licensed under the OSI-approved [MIT License](LICENSE),
+which permits commercial use subject to its terms and notice requirements.
+Third-party code and downloaded model/runtime artifacts keep their separate
+terms; see
+[third-party notices](THIRD_PARTY_NOTICES.md). Contributions are covered by the
+same project terms described in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Development
 
 ```bash
@@ -158,3 +173,5 @@ The app name, bundle prefix and version are set in `Config/app.env`; nothing els
 - [docs/demo.md](docs/demo.md): a full walkthrough and the self-test
 - [docs/manual-tests.md](docs/manual-tests.md): manual test checklist
 - [docs/semantic-search.md](docs/semantic-search.md): how semantic search works
+- [docs/release-checklist.md](docs/release-checklist.md): current release review gates
+- [SECURITY.md](SECURITY.md): vulnerability reporting and security scope

@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
 # Immutable upstream revisions; SHA-256 values verified from HF LFS metadata and
 # the official GitHub release digest (small JSONs hashed from that same revision).
+# The checked-in Apache license text is pinned to the official ASF text digest.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ $# -gt 1 ]]; then
     printf 'Usage: %s [models-directory]\n' "$0" >&2
     exit 2
 fi
+HF_REV=daa72c51243991dfcaf9f9137d2c573d8f7790c0
+HF_BASE="https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/$HF_REV"
+ORT_VERSION=1.31.0
+EMBEDDINGGEMMA_LICENSE_HASH=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+EMBEDDINGGEMMA_NOTICE_HASH=354b2cec84f3ee07c6102571a08af0d8c6262208f11087effb554e559b0f5138
+
+valid() { [[ -f "$1" ]] && [[ "$(shasum -a 256 "$1" | cut -d ' ' -f 1)" == "$2" ]]; }
+if ! valid "$ROOT_DIR/licenses/Apache-2.0.txt" "$EMBEDDINGGEMMA_LICENSE_HASH"; then
+    printf 'Apache-2.0 license text failed integrity check: %s\n' "$ROOT_DIR/licenses/Apache-2.0.txt" >&2
+    exit 1
+fi
+if ! valid "$ROOT_DIR/licenses/EmbeddingGemma2-NOTICE.txt" "$EMBEDDINGGEMMA_NOTICE_HASH"; then
+    printf 'EmbeddingGemma notice failed integrity check: %s\n' "$ROOT_DIR/licenses/EmbeddingGemma2-NOTICE.txt" >&2
+    exit 1
+fi
+
 DEST="${1:-$ROOT_DIR/build/models}"
 mkdir -p "$DEST"
 DEST="$(cd "$DEST" && pwd)"
 WORK="$(mktemp -d "$DEST/.fetch.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-HF_REV=daa72c51243991dfcaf9f9137d2c573d8f7790c0
-HF_BASE="https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/$HF_REV"
-ORT_VERSION=1.31.0
 
-valid() { [[ -f "$1" ]] && [[ "$(shasum -a 256 "$1" | cut -d ' ' -f 1)" == "$2" ]]; }
 fetch() {
     local url="$1" path="$2" hash="$3"
     if valid "$path" "$hash"; then printf 'Verified %s\n' "${path#$DEST/}"; return; fi
@@ -27,6 +40,7 @@ fetch() {
     mv "$WORK/download" "$path"
 }
 
+# Keep in sync with the expected hash in Sources/EmbedKit/ONNXRuntime.swift.
 DYLIB_HASH=2a50a63e7f41f8d4d551d3ee47248df3864f6540109fce8ad520ca3b51af4b70
 LICENSE_HASH=2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c
 NOTICES_HASH=143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3
@@ -61,4 +75,12 @@ d06edd601f851c633a2519304cbeb8dc6170d7ceb61b436625c17fb9b6e74953 onnx/model_quan
 9344893f8d0573a46ebb2ca54c03f56d044cea194c8dcfb1f4d652240ac21daa preprocessor_config.json
 031e56a498d33c349ab489a21885bcfe25b4fcba841149dc99e1e90d4a7c28f5 config_sentence_transformers.json
 ARTIFACTS
+cp "$ROOT_DIR/licenses/Apache-2.0.txt" "$WORK/embeddinggemma-license"
+cp "$ROOT_DIR/licenses/EmbeddingGemma2-NOTICE.txt" "$WORK/embeddinggemma-notice"
+if ! valid "$WORK/embeddinggemma-license" "$EMBEDDINGGEMMA_LICENSE_HASH" || ! valid "$WORK/embeddinggemma-notice" "$EMBEDDINGGEMMA_NOTICE_HASH"; then
+    printf 'Model license or notice failed integrity check\n' >&2
+    exit 1
+fi
+mv "$WORK/embeddinggemma-license" "$DEST/EMBEDDINGGEMMA-APACHE-2.0-LICENSE.txt"
+mv "$WORK/embeddinggemma-notice" "$DEST/EMBEDDINGGEMMA-NOTICE.txt"
 printf 'Models ready: %s\n' "$DEST"
