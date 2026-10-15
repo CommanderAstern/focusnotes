@@ -121,6 +121,57 @@ public enum NoteParser {
         return CaptureFormat.unfencedLines(lines).contains { $0 > last.marker && CaptureFormat.atxHeading(lines[$0]) != nil }
     }
 
+    /// The same source/heading rules as `boundaries`, carried forward across
+    /// appends without retaining or reparsing the preceding note body.
+    struct SourceHeadingState {
+        private var fence = CaptureFormat.FenceState()
+        private var pending = ""
+        private var previousLine: String?
+        private var source: String?
+        private var lastCaptureSource: String?
+        private var hasCapture = false
+        private var headingAfterCapture = false
+
+        var retainedByteCount: Int {
+            pending.utf8.count + (previousLine?.utf8.count ?? 0) + (source?.utf8.count ?? 0) + (lastCaptureSource?.utf8.count ?? 0)
+        }
+
+        mutating func consume(_ text: String, calendar: Calendar) {
+            let lines = (pending + text).components(separatedBy: "\n")
+            pending = lines.last ?? ""
+            for raw in lines.dropLast() {
+                // A trailing CR is part of CRLF only once its newline arrives.
+                let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+                consumeLine(line, calendar: calendar)
+            }
+        }
+
+        func needsHeading(_ requested: String, calendar: Calendar) -> Bool {
+            var complete = self
+            complete.consumeLine(pending, calendar: calendar)
+            return !complete.hasCapture || complete.lastCaptureSource != requested || complete.headingAfterCapture
+        }
+
+        private mutating func consumeLine(_ line: String, calendar: Calendar) {
+            guard fence.isVisible(line) else {
+                previousLine = nil
+                return
+            }
+            defer { previousLine = line.hasPrefix("### ") ? line : nil }
+            if line.hasPrefix("### ") { source = String(line.dropFirst(4)) }
+            if CaptureFormat.atxHeading(line) != nil { headingAfterCapture = true }
+            guard let marker = NoteParser.parseMarker(line) else { return }
+            if marker.metadata == nil {
+                guard let previousLine, previousLine.hasPrefix("### "),
+                      let old = NoteParser.parseHeader(String(previousLine.dropFirst(4)), calendar: calendar) else { return }
+                source = CaptureFormat.sourceHeading(CaptureSource(appName: old.app, windowTitle: old.window))
+            }
+            lastCaptureSource = source
+            hasCapture = true
+            headingAfterCapture = false
+        }
+    }
+
     private static func parseNoteMarker(_ line: String) -> (id: UUID, date: Date)? {
         let prefix = "<!-- note:"
         guard line.hasPrefix(prefix), line.hasSuffix(CaptureFormat.markerSuffix) else { return nil }

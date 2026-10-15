@@ -5,19 +5,36 @@ public actor NoteWriter {
     private let vault: Vault
     private let calendar: Calendar
     private let afterAppend: (@Sendable (URL) -> Void)?
+    private let beforeAppend: (@Sendable (URL) -> Void)?
+    private var appendCache = NoteFile.AppendCache()
+
+    @_spi(Checks)
+    public var appendCacheStatistics: (fullScans: Int, cachedFiles: Int) {
+        (appendCache.fullScans, appendCache.fileCount)
+    }
+
+    @_spi(Checks)
+    public static func sourceGroupingMatchesFullParser(_ contents: String, source: String, calendar: Calendar) -> Bool {
+        var state = NoteParser.SourceHeadingState()
+        state.consume(contents, calendar: calendar)
+        return state.needsHeading(source, calendar: calendar) == NoteParser.needsSourceHeading(source, contents: contents, calendar: calendar)
+    }
 
     public init(vault: Vault, calendar: Calendar) {
         self.vault = vault
         self.calendar = calendar
         afterAppend = nil
+        beforeAppend = nil
     }
 
     /// Deterministic atomic-replacement injection, unavailable to normal clients.
     @_spi(Checks)
-    public init(vault: Vault, calendar: Calendar, afterAppend: @escaping @Sendable (URL) -> Void) {
+    public init(vault: Vault, calendar: Calendar, beforeAppend: (@Sendable (URL) -> Void)? = nil,
+                afterAppend: @escaping @Sendable (URL) -> Void) {
         self.vault = vault
         self.calendar = calendar
         self.afterAppend = afterAppend
+        self.beforeAppend = beforeAppend
     }
 
     /// Appends one capture block to `note`. Creates the file with its header when it does not exist.
@@ -29,7 +46,7 @@ public actor NoteWriter {
         )
         let header = CaptureFormat.noteHeader(title: title) + "\n"
 
-        try NoteFile.append(block: block, header: header, to: note, sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, afterWrite: afterAppend)
+        try NoteFile.append(block: block, header: header, to: note, cache: &appendCache, identityPrefix: identityPrefix(capture), sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, beforeWrite: beforeAppend, afterWrite: afterAppend)
     }
 
     /// Retries keep the original marker and asset path, including after journal replay.
@@ -51,7 +68,15 @@ public actor NoteWriter {
         let marker = "<!-- \(prefix):\(capture.id.uuidString.lowercased()) -->"
         let savedNoteMarker = noteMarkerIsIdentity && prefix == "note" ? String(block.prefix(while: { $0 != "\n" })) : nil
         try NoteFile.append(block: block, header: CaptureFormat.noteHeader(title: destination.title) + "\n",
-                            to: destination.url, unlessMarkerExists: marker, savedNoteMarker: savedNoteMarker, sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, afterWrite: afterAppend)
+                            to: destination.url, cache: &appendCache, identityPrefix: identityPrefix(capture), unlessMarkerExists: marker, savedNoteMarker: savedNoteMarker, sourceHeading: headingSource(capture), equivalentBlocks: legacyBlocks(capture, block: block), calendar: calendar, beforeWrite: beforeAppend, afterWrite: afterAppend)
+    }
+
+    private func identityPrefix(_ capture: Capture) -> String {
+        switch capture.content {
+        case .note: "<!-- note:\(capture.id.uuidString.lowercased())"
+        case .subheading: "<!-- subheading:\(capture.id.uuidString.lowercased())"
+        default: "<!-- capture:\(capture.id.uuidString.lowercased())"
+        }
     }
 
     private func legacyBlocks(_ capture: Capture, block: String) -> [String] {

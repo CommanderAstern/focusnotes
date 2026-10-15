@@ -1,4 +1,5 @@
 @_spi(Checks) import Core
+import Darwin
 import Foundation
 
 func checkNoteWriter() async throws {
@@ -83,7 +84,149 @@ func checkNoteWriter() async throws {
     try await checkSourceGrouping(vault: vault, calendar: calendar, capture: capture)
     try await checkPartialCaptureReplay(vault: vault, calendar: calendar, capture: capture)
     try await checkAtomicReplacement(vault: vault, calendar: calendar, capture: capture)
+    try await checkAppendCache(vault: vault, calendar: calendar, capture: capture)
+    try await checkCachedSourceParsing(vault: vault, calendar: calendar, capture: capture)
+    try await checkInPlaceEditBeforeAppend(vault: vault, calendar: calendar, capture: capture)
     print("NoteWriter checks passed.")
+}
+
+private final class InPlaceSourceEditor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    private(set) var error: Error?
+
+    func arm() {
+        lock.lock()
+        defer { lock.unlock() }
+        armed = true
+    }
+
+    func edit(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard armed else { return }
+        armed = false
+        do {
+            let before = try String(contentsOf: url, encoding: .utf8)
+            let bytes = Data(before.replacingOccurrences(of: "### Safari\n", with: "### Chrome\n").utf8)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.write(contentsOf: bytes)
+        } catch { self.error = error }
+    }
+}
+
+private func checkInPlaceEditBeforeAppend(vault: Vault, calendar: Calendar, capture: Capture) async throws {
+    let editor = InPlaceSourceEditor()
+    let writer = NoteWriter(vault: vault, calendar: calendar, beforeAppend: { editor.edit($0) }, afterAppend: { _ in })
+    let url = vault.root.appendingPathComponent("Prewrite edit.md")
+    let destination = Destination(url: url, title: "Prewrite edit", kind: .note)
+    try await writer.appendIfMissing(capture, to: destination)
+    editor.arm()
+    var next = capture
+    next.id = UUID(); next.content = .text("After racing edit")
+    try await writer.appendIfMissing(next, to: destination)
+    let contents = try checkRead(url)
+    let statistics = await writer.appendCacheStatistics
+    try require(editor.error == nil, "in-place prewrite fixture failed")
+    try require(statistics.fullScans == 2, "a detected in-place edit must retry and rescan before writing")
+    try require(contents.contains("### Chrome\n" + checkCaptureMarker(capture.id)) &&
+                contents.contains("### Safari\n" + checkCaptureMarker(next.id)),
+                "a detected edit must recompute the source heading and preserve editor bytes")
+    try require(contents.components(separatedBy: checkCaptureMarker(next.id)).count - 1 == 1, "prewrite retry must append the new capture exactly once")
+}
+
+private func checkAppendCache(vault: Vault, calendar: Calendar, capture: Capture) async throws {
+    let writer = NoteWriter(vault: vault, calendar: calendar)
+    let url = vault.root.appendingPathComponent("Cached.md")
+    let destination = Destination(url: url, title: "Cached", kind: .note)
+    try checkWrite("# Cached\n\n" + String(repeating: "old content\n", count: 100_000), to: url)
+    try await writer.appendIfMissing(capture, to: destination)
+    var next = capture
+    next.id = UUID(); next.content = .text("Second cached body")
+    try await writer.appendIfMissing(next, to: destination)
+    let saved = try Data(contentsOf: url)
+    try await writer.appendIfMissing(capture, to: destination)
+    let replayed = try Data(contentsOf: url)
+    var statistics = await writer.appendCacheStatistics
+    try require(replayed == saved && statistics.fullScans == 1, "warm appends/replay should use one initial scan and exact block verification")
+
+    // Same inode, same size and restored mtime: ctime must still invalidate source state.
+    var beforeEdit = stat()
+    try require(stat(url.path, &beforeEdit) == 0, "could not read the cache invalidation fixture's timestamps")
+    let edited = String(decoding: saved, as: UTF8.self).replacingOccurrences(of: "### Safari\n", with: "### Chrome\n")
+    try checkWrite(edited, to: url)
+    let times = [beforeEdit.st_atimespec, beforeEdit.st_mtimespec]
+    let restored = times.withUnsafeBufferPointer { utimensat(AT_FDCWD, url.path, $0.baseAddress, 0) }
+    try require(restored == 0, "could not restore the cache invalidation fixture's exact mtime")
+    var afterEditStat = stat()
+    try require(stat(url.path, &afterEditStat) == 0, "could not inspect the edited cache invalidation fixture")
+    try require(afterEditStat.st_ino == beforeEdit.st_ino && afterEditStat.st_size == beforeEdit.st_size &&
+                afterEditStat.st_mtimespec.tv_sec == beforeEdit.st_mtimespec.tv_sec &&
+                afterEditStat.st_mtimespec.tv_nsec == beforeEdit.st_mtimespec.tv_nsec,
+                "cache invalidation fixture must preserve inode, size, and nanosecond mtime")
+    try require(afterEditStat.st_ctimespec.tv_sec != beforeEdit.st_ctimespec.tv_sec ||
+                afterEditStat.st_ctimespec.tv_nsec != beforeEdit.st_ctimespec.tv_nsec,
+                "cache invalidation fixture must change ctime")
+    next.id = UUID(); next.content = .text("After same-size edit")
+    try await writer.appendIfMissing(next, to: destination)
+    let afterEdit = try checkRead(url)
+    statistics = await writer.appendCacheStatistics
+    try require(statistics.fullScans == 2 && afterEdit.contains("### Safari\n" + checkCaptureMarker(next.id)), "same-size edits must invalidate cached source context")
+
+    // An atomic editor save can preserve every byte while replacing the inode.
+    try Data(afterEdit.utf8).write(to: url, options: .atomic)
+    try await writer.appendIfMissing(next, to: destination)
+    let afterReplacement = try checkRead(url)
+    statistics = await writer.appendCacheStatistics
+    try require(statistics.fullScans == 3 && afterReplacement == afterEdit, "replacement must rescan and keep replay idempotent")
+
+    // The metadata cache is bounded even when captures visit many destinations.
+    for index in 0..<12 {
+        next.id = UUID()
+        let note = vault.root.appendingPathComponent("Cache limit \(index).md")
+        try await writer.appendIfMissing(next, to: Destination(url: note, title: "Cache limit", kind: .note))
+    }
+    statistics = await writer.appendCacheStatistics
+    try require(statistics.cachedFiles <= 8, "append cache must evict old destinations")
+    let scansBefore = statistics.fullScans
+    try await writer.appendIfMissing(capture, to: destination)
+    statistics = await writer.appendCacheStatistics
+    try require(statistics.fullScans == scansBefore + 1, "an evicted destination must safely rescan for a replay")
+}
+
+private func checkCachedSourceParsing(vault: Vault, calendar: Calendar, capture: Capture) async throws {
+    // Compare one persistent writer against fresh full-scan writers after every
+    // append, including open fences, legacy grouping and headings inside notes.
+    let cached = vault.root.appendingPathComponent("Source cached.md")
+    let fresh = vault.root.appendingPathComponent("Source fresh.md")
+    let legacy = "# Source\n\n### 2026-10-13 14:30 · Safari\n<!-- capture:\(UUID().uuidString.lowercased()) -->\n\nlegacy\n"
+    try checkWrite(legacy, to: cached)
+    try checkWrite(legacy, to: fresh)
+    let writer = NoteWriter(vault: vault, calendar: calendar)
+    let bodies: [CaptureContent] = [
+        .text("ordinary"), .text("```markdown\n## fenced heading\n```"),
+        .text("~~~\n# still fenced"), .text("### hidden source\n~~~"),
+        .note("## Note section\nbody"), .text("after a note heading"),
+        .subheading("Details"), .text("after a subheading"),
+        .text("````\n```\n## fenced\n````"), .text("final"),
+    ]
+    for content in bodies {
+        var item = capture
+        item.id = UUID(); item.content = content
+        try await writer.appendIfMissing(item, to: Destination(url: cached, title: "Source", kind: .note))
+        let other = NoteWriter(vault: vault, calendar: calendar)
+        try await other.appendIfMissing(item, to: Destination(url: fresh, title: "Source", kind: .note))
+        let cachedBytes = try Data(contentsOf: cached)
+        let freshBytes = try Data(contentsOf: fresh)
+        try require(cachedBytes == freshBytes, "incremental source grouping must match full scans across fences, notes, and legacy markers")
+        for source in ["Safari", "Chrome", "Unknown source"] {
+            try require(NoteWriter.sourceGroupingMatchesFullParser(String(decoding: cachedBytes, as: UTF8.self), source: source, calendar: calendar), "source scanner must agree with the full note parser")
+        }
+    }
+    for suffix in ["\r\n### Safari\r\n", "\n### Chrome", "\n~~~\n## fenced", "\n### Safari\n<!-- capture:\(capture.id.uuidString.lowercased()) -->", "\n    ```\n# indented"] {
+        try require(NoteWriter.sourceGroupingMatchesFullParser(legacy + suffix, source: "Safari", calendar: calendar), "source scanner must preserve partial-line and fence semantics")
+    }
 }
 
 private func checkPartialCaptureReplay(vault: Vault, calendar: Calendar, capture: Capture) async throws {

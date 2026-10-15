@@ -82,9 +82,19 @@ public enum CaptureFormat {
 
     /// Markdown structure ignores fenced code, including longer and tilde fences.
     static func unfencedLines(_ lines: [String]) -> [Int] {
-        var fence: (Character, Int)?
+        var state = FenceState()
         var result: [Int] = []
         for (index, line) in lines.enumerated() {
+            if state.isVisible(line) { result.append(index) }
+        }
+        return result
+    }
+
+    /// Shared by full parsing and incremental append source grouping.
+    struct FenceState {
+        private var fence: (Character, Int)?
+
+        mutating func isVisible(_ line: String) -> Bool {
             let indentation = line.prefix(while: { $0 == " " }).count
             let text = line.dropFirst(min(indentation, 3))
             if indentation <= 3, let first = text.first, first == "`" || first == "~" {
@@ -93,11 +103,10 @@ public enum CaptureFormat {
                 if let current = fence {
                     if first == current.0, count >= current.1, rest.allSatisfy(\.isWhitespace) { fence = nil }
                 } else if count >= 3, first != "`" || !rest.contains("`") { fence = (first, count) }
-                if count >= 3 { continue }
+                if count >= 3 { return false }
             }
-            if fence == nil { result.append(index) }
+            return fence == nil
         }
-        return result
     }
 
     static func atxHeading(_ line: String) -> (level: Int, text: String)? {
