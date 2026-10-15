@@ -14,6 +14,7 @@ struct SelfTestFailure: Error, CustomStringConvertible {
 extension AppController {
     func runSelfTest() async throws -> String {
         try checkMenuKeyEquivalents()
+        try await checkNoteDraftStoreScheduling()
         if ProcessInfo.processInfo.environment["QUICK_NOTE_SELF_TEST"] == "1" {
             try await checkQuickNotePinPersistence()
             return "{\"ok\":true,\"noteDraftPinPersistenceVerified\":true,\"legacyDraftMigrationVerified\":true,\"draftPinRetryVerified\":true,\"pinStorageFailureNonfatalVerified\":true,\"draftPinRecoveryVerified\":true,\"finalPinFailureToastVerified\":true}"
