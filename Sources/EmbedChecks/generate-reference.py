@@ -1,4 +1,5 @@
 """Verification only. Run once in build/embed-venv; never used by the engine.
+python3 -m venv build/embed-venv && build/embed-venv/bin/pip install -r Sources/EmbedChecks/requirements-reference.txt
 HF_HOME=build/hf-cache build/embed-venv/bin/python Sources/EmbedChecks/generate-reference.py
 Requires tokenizers, sentence-transformers 6.1+, transformers 5.19+, torch, pillow.
 """
@@ -84,7 +85,7 @@ for item in texts:
 vector = truncate(model.encode({"image": str(OUT / "token-bucket.png")}, normalize_embeddings=True))
 fixture = {"model": "google/embeddinggemma-2", "revision": MODEL_REVISION,
     "dtype": "float32", "backend": "official SentenceTransformer mean pooling + normalize; torchvision antialias bicubic default image processor",
-    "versions": {p: importlib.metadata.version(p) for p in ["torch", "torchvision", "transformers", "sentence-transformers", "tokenizers", "pillow"]},
+    "versions": {p: importlib.metadata.version(p) for p in ["torch", "torchvision", "transformers", "sentence-transformers", "tokenizers", "pillow", "numpy"]},
     "dimensions": 256, "texts": texts, "image": {"file": "token-bucket.png", "vector": vector}}
 (OUT / "embeddings.json").write_text(json.dumps(fixture, ensure_ascii=True, indent=2) + "\n")
 print("Reference fixtures written", flush=True)

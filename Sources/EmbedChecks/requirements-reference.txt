@@ -1,0 +1,23 @@
+# Pinned Python requirements for Sources/EmbedChecks/generate-reference.py.
+#
+# Optional. Only needed to regenerate the reference fixtures in Fixtures/.
+# The app and the Swift package build and run without any of these packages.
+#
+# Versions are the ones recorded in Fixtures/embeddings.json ("versions")
+# and Fixtures/tokenizer.json ("tokenizers_version"). No Python interpreter
+# version is recorded in the fixtures.
+#
+# Setup:
+#   python3 -m venv build/embed-venv
+#   build/embed-venv/bin/pip install -r Sources/EmbedChecks/requirements-reference.txt
+
+torch==2.14.1
+torchvision==0.29.1
+transformers==5.19.0
+sentence-transformers==6.1.0
+tokenizers==0.23.3
+pillow==12.3.0
+
+# numpy is imported by the script but its version was not recorded in the
+# fixtures, so only a bound is given here.
+numpy>=1.26,<3

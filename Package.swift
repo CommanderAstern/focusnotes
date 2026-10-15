@@ -20,7 +20,7 @@ let package = Package(
                                  .linkedFramework("ImageIO")]),
         .executableTarget(name: "EmbedHelper", dependencies: ["EmbedKit"]),
         .executableTarget(name: "EmbedChecks", dependencies: ["EmbedKit"],
-                          exclude: ["generate-reference.py"], resources: [.copy("Fixtures")],
+                          exclude: ["generate-reference.py", "requirements-reference.txt"], resources: [.copy("Fixtures")],
                           linkerSettings: [.linkedLibrary("sqlite3")]),
         .target(name: "Core", linkerSettings: [.linkedLibrary("sqlite3")]),
         .target(
