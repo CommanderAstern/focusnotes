@@ -1,5 +1,61 @@
 import Foundation
 
+public enum NotePathScope: String, Codable, Sendable, Equatable {
+    case vault
+    case home
+}
+
+/// A validated, filename-safe name split into its destination root and path components.
+public struct NotePathName: Sendable, Equatable {
+    static let maximumPathDepth = 32
+    static let maximumRelativePathBytes = 900
+
+    public let scope: NotePathScope
+    public let components: [String]
+
+    public var relativePath: String { components.joined(separator: "/") }
+    public var leafName: String { components[components.count - 1] }
+    public var displayTitle: String {
+        guard leafName.count > 60 else { return leafName }
+        let end = leafName.index(leafName.startIndex, offsetBy: 60)
+        var prefix = String(leafName[..<end])
+        if !leafName[end].isWhitespace, let boundary = prefix.lastIndex(of: " ") {
+            prefix = String(prefix[..<boundary])
+        }
+        return prefix.trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    private init(scope: NotePathScope, components: [String]) {
+        self.scope = scope
+        self.components = components
+    }
+
+    /// Creates a path value from already-sanitized filename components.
+    /// User-facing names should normally go through `NoteTitle.pathName(for:)`;
+    /// this factory is for trusted code that adds validated path components.
+    static func validated(scope: NotePathScope, components: [String]) throws -> NotePathName {
+        guard !components.isEmpty else { throw NotePathNameError.emptyPath }
+        guard components.count <= maximumPathDepth else { throw NotePathNameError.tooDeep }
+        guard components.allSatisfy({ !$0.isEmpty && $0 == NoteTitle.fileStem(for: $0) }) else {
+            throw NotePathNameError.invalidComponent
+        }
+        guard let leafName = components.last, !leafName.hasPrefix("~$") else {
+            throw NotePathNameError.invalidComponent
+        }
+        guard components.joined(separator: "/").utf8.count <= maximumRelativePathBytes else {
+            throw NotePathNameError.tooLong
+        }
+        return NotePathName(scope: scope, components: components)
+    }
+}
+
+public enum NotePathNameError: Error, Sendable, Equatable {
+    case emptyPath
+    case invalidComponent
+    case tooDeep
+    case tooLong
+}
+
 public enum NoteTitle {
     /// Trims the title and collapses every run of whitespace to a single space.
     public static func cleanTitle(_ title: String) -> String {
@@ -14,6 +70,50 @@ public enum NoteTitle {
                 locale: Locale(identifier: "en_US_POSIX")
             )
             .lowercased()
+    }
+
+    /// Parses a note name into a safe relative path. A leading slash selects
+    /// the user's home directory; an unprefixed name is relative to the vault.
+    /// Each path component uses the same bounded filename sanitization as a
+    /// single-component title.
+    public static func pathName(for rawName: String) throws -> NotePathName {
+        let cleanedName = cleanTitle(rawName)
+        guard !cleanedName.contains("\0") else { throw NotePathNameError.invalidComponent }
+
+        let scope: NotePathScope = cleanedName.hasPrefix("/") ? .home : .vault
+        let unrooted = scope == .home ? String(cleanedName.dropFirst()) : cleanedName
+        guard !unrooted.isEmpty else { throw NotePathNameError.emptyPath }
+
+        let rawComponents = unrooted.split(separator: "/", omittingEmptySubsequences: false)
+        guard rawComponents.count <= NotePathName.maximumPathDepth else { throw NotePathNameError.tooDeep }
+
+        var components: [String] = []
+        components.reserveCapacity(rawComponents.count)
+        for rawComponent in rawComponents {
+            let component = cleanTitle(String(rawComponent))
+            guard !component.isEmpty, component != ".", component != ".." else {
+                throw NotePathNameError.invalidComponent
+            }
+            components.append(fileStem(for: component))
+        }
+        return try NotePathName.validated(scope: scope, components: components)
+    }
+
+    /// Returns whether a malformed or whitespace-qualified path should retain
+    /// the legacy behavior of treating the full input as one flat filename.
+    static func canFallBackToFlatName(_ rawName: String, error: NotePathNameError?) -> Bool {
+        let cleanedName = cleanTitle(rawName)
+        guard !cleanedName.hasPrefix("/"), !rawName.contains("\0") else { return false }
+        if let error, error != .invalidComponent { return false }
+        let components = rawName.split(separator: "/", omittingEmptySubsequences: false)
+            .map { cleanTitle(String($0)) }
+        guard !components.contains(where: { $0 == "." || $0 == ".." }) else { return false }
+        if let finalComponent = components.last(where: { !$0.isEmpty }),
+           fileStem(for: finalComponent).hasPrefix("~$") { return false }
+
+        let hasWhitespaceAroundSlash = rawName.range(of: #"\s/|/\s"#, options: .regularExpression) != nil
+        if error == nil { return hasWhitespaceAroundSlash }
+        return hasWhitespaceAroundSlash || rawName.hasSuffix("/") || rawName.contains("//")
     }
 
     /// File name stem (without `.md`) for a note title. Never empty.

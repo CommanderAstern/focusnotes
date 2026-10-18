@@ -1,7 +1,13 @@
 import Foundation
 
-/// A root note's display title and body, derived without rewriting the draft.
+/// A note's display title and body, derived without rewriting the draft.
 public struct TypedNote: Sendable {
+    /// The complete extracted name before display-title truncation.
+    public let rawName: String
+    /// Parsed path, when the extracted name is safe to use as a destination.
+    public let pathName: NotePathName?
+    /// The validation failure when an explicit path cannot be used as a destination.
+    public let pathNameError: NotePathNameError?
     public let title: String
     public let body: String
 
@@ -11,24 +17,42 @@ public struct TypedNote: Sendable {
             !$0.trimmingCharacters(in: .whitespaces).isEmpty
         } ?? ""
         let stripped = Self.strip(first)
-        if stripped.isEmpty {
-            title = "Note " + CaptureFormat.localStamp(createdAt, pattern: "yyyy-MM-dd HH.mm", calendar: calendar)
-        } else if stripped.count > 60 {
-            let end = stripped.index(stripped.startIndex, offsetBy: 60)
-            var prefix = String(stripped[..<end])
-            if !stripped[end].isWhitespace, let boundary = prefix.lastIndex(of: " ") {
-                prefix = String(prefix[..<boundary])
-            }
-            title = prefix.trimmingCharacters(in: .whitespaces) + "…"
-        } else {
-            title = stripped
+        let extractedName = stripped.isEmpty
+            ? "Note " + CaptureFormat.localStamp(createdAt, pattern: "yyyy-MM-dd HH.mm", calendar: calendar)
+            : stripped
+        let parsedName: NotePathName?
+        let parseError: NotePathNameError?
+        do {
+            parsedName = try NoteTitle.pathName(for: extractedName)
+            parseError = nil
+        } catch let error as NotePathNameError {
+            parsedName = nil
+            parseError = error
+        } catch {
+            parsedName = nil
+            parseError = .invalidComponent
         }
+        let flatFallback = NoteTitle.canFallBackToFlatName(extractedName, error: parseError)
+        let resolvedName = flatFallback
+            ? try? NotePathName.validated(scope: .vault, components: [NoteTitle.fileStem(for: extractedName)])
+            : parsedName
+        let isFolderQualified = parsedName.map {
+            !flatFallback && ($0.scope == .home || $0.components.count > 1)
+        } ?? false
+        let rawLeaf = isFolderQualified
+            ? String(extractedName.split(separator: "/", omittingEmptySubsequences: false).last ?? "")
+            : extractedName
+        rawName = extractedName
+        pathName = resolvedName
+        pathNameError = resolvedName == nil ? parseError : nil
+        title = Self.boundedTitle(isFolderQualified ? NoteTitle.cleanTitle(rawLeaf) : extractedName)
 
         // Only the physical first line is eligible. Lists, quotes and code are
         // meaningful body content even when their text becomes the note title.
         let line = markdown.components(separatedBy: .newlines).first ?? ""
         let structural = #"^(?:[ \t]*(?:[-*+][ \t]+|[0-9]+[.)][ \t]+|>|`|~{3})|\t| {4})"#
-        if !stripped.isEmpty, Self.strip(line) == title,
+        let firstLineMatchTitle = isFolderQualified ? extractedName : title
+        if !stripped.isEmpty, Self.strip(line) == firstLineMatchTitle,
            line.range(of: structural, options: .regularExpression) == nil {
             if let newline = markdown.rangeOfCharacter(from: .newlines) {
                 var remainder = String(markdown[newline.upperBound...])
@@ -58,5 +82,15 @@ public struct TypedNote: Sendable {
 
     private static func replace(_ pattern: String, in text: String, with replacement: String) -> String {
         text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+    }
+
+    private static func boundedTitle(_ title: String) -> String {
+        guard title.count > 60 else { return title }
+        let end = title.index(title.startIndex, offsetBy: 60)
+        var prefix = String(title[..<end])
+        if !title[end].isWhitespace, let boundary = prefix.lastIndex(of: " ") {
+            prefix = String(prefix[..<boundary])
+        }
+        return prefix.trimmingCharacters(in: .whitespaces) + "…"
     }
 }

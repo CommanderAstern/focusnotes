@@ -58,7 +58,7 @@ extension AppController {
         let sessionCount = try await endSession(session)
         let ownExternal = PendingCapture(trigger: .selection, content: .text("coalescedownneedle app append"),
                                          source: CapturePipeline.source(context), subtitle: "App append")
-        let ownJob = await pipeline.prepare(ownExternal, noteTitle: "External Edit")
+        let ownJob = try await pipeline.prepare(ownExternal, noteTitle: "External Edit")
         try await pipeline.journal.store(ownJob)
         _ = try await pipeline.commit(ownJob)
         let external = Capture(id: UUID(), createdAt: Date(), content: .text("watcherexternalneedle appended by another editor"),
@@ -317,7 +317,11 @@ extension AppController {
               try Data(contentsOf: created.destination.url) == rootBytes,
               !FileManager.default.fileExists(atPath: live.vault.root.appendingPathComponent("independentnoteneedle 2.md").path) else { throw SelfTestFailure("New-note replay changed its path/bytes or retained the original draft") }
         guard let duplicateTitle = try await controller.addNote(rootDraft),
-              duplicateTitle.destination.url.lastPathComponent == "independentnoteneedle 2.md" else { throw SelfTestFailure("Controller collision suffix failed") }
+              duplicateTitle.destination.url == created.destination.url,
+              !FileManager.default.fileExists(atPath: live.vault.root.appendingPathComponent("independentnoteneedle 2.md").path),
+              try String(contentsOf: duplicateTitle.destination.url, encoding: .utf8).contains("<!-- note:\(duplicateTitle.captureID.uuidString.lowercased()) at=") else {
+            throw SelfTestFailure("Controller typed-note collision did not append to the existing note")
+        }
         try await checkQuickNotePinPersistence()
         let resumed = try await controller.startSession(name: "feedback")
         guard resumed.notePath == session.notePath, resumed.resumed == true else { throw SelfTestFailure("Session did not resume by name") }
@@ -523,6 +527,26 @@ extension AppController {
         guard try await pinPipeline.journal.recordURLs().isEmpty, try Data(contentsOf: saved.destination.url) == savedBytes else {
             throw SelfTestFailure("Shutdown retried a note that had already saved despite its pin error")
         }
+
+        let resolveBase = base.appendingPathComponent("PinIdentityFailure", isDirectory: true)
+        let opened = try await CapturePipeline.open(vaultRoot: resolveBase.appendingPathComponent("Vault"),
+            stateDirectory: resolveBase.appendingPathComponent("State"), calendar: pipeline.calendar)
+        let resolvePipeline = CapturePipeline(vault: opened.vault, sessions: opened.sessions, service: opened.service,
+            index: opened.index, semantic: opened.semantic, monitor: opened.monitor, journal: opened.journal,
+            drafts: opened.drafts, pins: opened.pins, calendar: opened.calendar, logger: opened.logger,
+            noteIDForPin: { _ in throw CocoaError(.fileReadInvalidFileName) })
+        var resolveToasts: [Toast] = []
+        let resolveController = AppController(pipeline: resolvePipeline, presentsUI: false, onToast: { resolveToasts.append($0) })
+        guard let resolvedSaved = try await resolveController.addNote("# PinIdentityFailure\n\nSaved despite pin identity lookup failure.", pinOnSave: true),
+              fm.fileExists(atPath: resolvedSaved.destination.url.path),
+              resolveToasts.count == 1, resolveToasts.last?.style == .warning,
+              resolveToasts.last?.title == "Note saved, but not pinned",
+              resolvePipeline.pins.paths().isEmpty,
+              try resolvePipeline.drafts.loadSnapshot().text.isEmpty,
+              try await resolvePipeline.journal.recordURLs().isEmpty else {
+            throw SelfTestFailure("A note identity lookup failure was not surfaced as a nonfatal pin warning")
+        }
+        _ = await resolveController.beginTermination().value
     }
 
     private func checkQuickNotePinRecovery(in base: URL) async throws {

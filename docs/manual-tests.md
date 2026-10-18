@@ -46,6 +46,72 @@ activating the host. Use the same signing identity across rebuilds.
 Permission and focus behavior require this signed host; `CaptureChecks` needs no
 privacy grants and uses a private named pasteboard, never the general pasteboard.
 
+# Folder paths and external notes
+
+Use a temporary vault and a disposable test folder under your home directory.
+
+1. **Vault-relative path:** In a standalone quick note, use
+   `science/math/trigonometry` as the title and save. Confirm the file is created
+   at `<vault>/science/math/trigonometry.md`, with missing folders created, and
+   the note appears in search. Edit the file outside Focusnotes and confirm its
+   indexed content updates.
+   Also confirm a valid unprefixed prose/date name such as `pros/cons of X` or
+   `10/18 standup` is interpreted as a folder path. Relative URL-shaped names,
+   `TODO/`, `a//b`, and a relative slash with whitespace beside it should instead
+   save as flat filenames using the legacy cleanup. Verify malformed leading-slash
+   HOME paths still show a path validation error.
+2. **Case-insensitive matching and append:** Create `Science/Algebra.md`, then
+   save a quick note titled `science/algebra` with distinctive text. Confirm the
+   original folder and filename are reused (no `science/` duplicate and no
+   `Algebra 2.md`) and the new typed note is appended to `Algebra.md` without
+   removing its existing content. Repeat with only the filename's case changed.
+3. **Home-relative path:** Save a quick note titled
+   `/Desktop/focusnotes-path-check/Geometry`. Confirm it lands at
+   `~/Desktop/focusnotes-path-check/Geometry.md`, outside the vault, and appears
+   in search. Edit it in another app and confirm the change is indexed. Restart
+   Focusnotes and confirm it remains available. Put a separate Markdown file
+   beside it without saving through Focusnotes; confirm it is not discovered or
+   indexed, and editing it does not make its content searchable. Repeat with a
+   disposable note directly under HOME (`/focusnotes-path-check-root`) and an
+   unregistered Markdown file beside it; confirm only the registered note's
+   edits become searchable. Save a second note in the same external folder, then
+   edit the first and confirm its change is still indexed. Remove the test files
+   when finished.
+4. **Path safety:** Try a title with a `..` component, such as
+   `science/../outside`, a leaf beginning `~$` (for example `folder/~$draft`),
+   and vault destinations `assets/example` and `ASSETS/example`. Also try the
+   leading-slash home-relative spelling of a path inside the vault's `assets/`
+   directory. Try destinations crossing a symbolic-link directory or file.
+   Confirm each save is rejected, no file outside the allowed destination is
+   changed, and the draft remains available for correction. On a case-sensitive
+   test volume, create a root-level `ASSETS/ignored.md` in the temporary vault;
+   confirm it stays out of Browse and Search like the `assets/` tree. When
+   checking watcher events, confirm changes there are classified as assets, not
+   notes.
+5. **Session namespace:** Start a session and save a typed note. Confirm it
+   appends under `Sessions/<session title>.md`; it does not create a note at a
+   title-derived folder or home-relative path. End the session and confirm a
+   standalone quick note uses the path from its title.
+   Create `Sessions/Standup.md` and `Sessions/archive/Standup.md`, start `Standup`,
+   and confirm the chooser lists both titles, paths, and modification dates in
+   newest-first order. Up/Down plus Return resumes the selected full path;
+   Escape leaves the session state and both notes untouched. A unique nested
+   bare-name match resumes its exact path, while `archive/Standup` resolves
+   directly without a chooser. A missing qualified name creates a nested session.
+6. **Registry preservation and recovery:** With a disposable state directory,
+   register two external notes, then replace `external-notes.json` with malformed
+   bytes, version 2, or a symlink. Confirm Focusnotes warns that the registry was
+   preserved, external notes disappear from search, vault notes remain searchable,
+   and an attempted external save is refused with a specific warning. Compare the
+   malformed/versioned file bytes before/after; for the symlink case, confirm the
+   symlink identity and target are unchanged. Restore a valid registry (or remove
+   the unsafe registry to restore a valid empty state), then confirm the warning
+   clears, external indexing and watching recover, and an external save succeeds.
+   Atomically replace a registered note in its parent folder, create an unregistered
+   Markdown sibling there, and churn an unrelated HOME subtree. Confirm the
+   registered replacement is reindexed, while neither the sibling nor unrelated
+   HOME files are indexed or reported as note changes.
+
 # Quick note panel (⌥⇧N)
 
 Run from the built app. Layout and behaviour are specified in `quick-note-ui.md`. For an isolated two-line
@@ -147,3 +213,5 @@ Close with esc after testing; the live fixture includes sample Browse rows.
    level/position. Change screen parameters: it re-clamps on-screen. Input/Search still dismiss on
    click-away and Space changes. Opening another focusnotes panel, save, esc/✕, Open as Note and
    app quit still close the note.
+
+Last Updated: 2026-10-18 (previous commit: `962ea7d78abc0298c7d1a66063a3d24476c95d8e`)

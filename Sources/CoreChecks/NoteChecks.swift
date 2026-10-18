@@ -6,6 +6,15 @@ func checkTypedNotes() async throws {
     defer { checkRemoveDirectory(base) }
     let vault = Vault(root: base.appendingPathComponent("Vault"))
     try vault.prepare()
+    for unsafePath in ["folder\\name.md", "folder/name\u{0007}.md"] {
+        do {
+            _ = try vault.fileSnapshot(relativePath: unsafePath)
+            throw CheckFailure.failed("managed relative identity path accepted unsafe component: \(unsafePath.debugDescription)")
+        } catch let error as POSIXError {
+            try require(error.code == .EPERM,
+                        "managed relative identity path should reject backslash and control characters")
+        }
+    }
     let calendar = checkCalendar()
     let date = checkDate(2026, 10, 13, 14, 30)
     let writer = NoteWriter(vault: vault, calendar: calendar)
@@ -84,6 +93,33 @@ private func checkIndependentNotes(vault: Vault, writer: NoteWriter, index: Sear
         try require(TypedNote(markdown: markdown, createdAt: date, calendar: calendar).title == expected,
                     "typed title derivation failed for \(markdown)")
     }
+    let nestedTyped = TypedNote(markdown: "# science/math/trigonometry\n\nBody", createdAt: date, calendar: calendar)
+    try require(nestedTyped.rawName == "science/math/trigonometry" && nestedTyped.pathName?.components == ["science", "math", "trigonometry"] &&
+                nestedTyped.title == "trigonometry" && nestedTyped.body == "\nBody",
+                "typed note should retain its full path while displaying and saving only the leaf title")
+    let longNestedLeaf = String(repeating: "word ", count: 15).trimmingCharacters(in: .whitespaces)
+    let longNested = TypedNote(markdown: "# science/math/\(longNestedLeaf)\nBody", createdAt: date, calendar: calendar)
+    try require(longNested.pathName?.components.last == longNestedLeaf && longNested.title.hasSuffix("…"),
+                "long folder-qualified typed names must resolve the full leaf before display truncation")
+    let unsafeTyped = TypedNote(markdown: "# science/../escape\nBody", createdAt: date, calendar: calendar)
+    try require(unsafeTyped.pathName == nil && unsafeTyped.pathNameError == .invalidComponent,
+                "typed note traversal must retain its path validation error")
+    for path in ["folder/ ../outside", "folder/. /outside"] {
+        let typed = TypedNote(markdown: "# \(path)\nBody", createdAt: date, calendar: calendar)
+        try require(typed.pathName == nil && typed.pathNameError == .invalidComponent,
+                    "whitespace must not turn a traversal component into an ordinary flat name: \(path)")
+    }
+    for (name, stem) in [
+        ("Read https://example.com", "Read https---example.com"),
+        ("TODO/", "TODO-"),
+        ("a//b", "a--b"),
+        ("pros / cons of X", "pros - cons of X")
+    ] {
+        let typed = TypedNote(markdown: "# \(name)\n\nFallback body", createdAt: date, calendar: calendar)
+        try require(typed.pathName?.scope == .vault && typed.pathName?.components == [stem] && typed.title == name &&
+                    typed.body == "\nFallback body",
+                    "malformed relative slash input should retain an ordinary note name: \(name)")
+    }
     for markdown in ["- title", "* title", "+ title", "1. title", "- [ ] title", "- [x] title", "> title", "`title`", "    title", "```title"] {
         try require(TypedNote(markdown: markdown, createdAt: date, calendar: calendar).body == markdown,
                     "list/task/quote/code first lines must remain in the body")
@@ -100,13 +136,53 @@ private func checkIndependentNotes(vault: Vault, writer: NoteWriter, index: Sear
                 "truncated title must not remove the first line")
     let sessions = SessionStore(stateDirectory: base.appendingPathComponent("State"), vault: vault, calendar: calendar, now: { date })
     let service = CaptureService(vault: vault, sessions: sessions, writer: writer, now: { date })
+    for (index, item) in [
+        ("Read https://example.com", "Read https---example.com.md"),
+        ("TODO/", "TODO-.md"),
+        ("a//b", "a--b.md"),
+        ("pros / cons of X", "pros - cons of X.md")
+    ].enumerated() {
+        let capture = Capture(id: UUID(), createdAt: date,
+                              content: .note("# \(item.0)\n\nFallback body \(index)"), source: CaptureSource())
+        let preparedFallback = try await service.prepareNote(capture, calendar: calendar)
+        try require(preparedFallback.destination.url.lastPathComponent == item.1,
+                    "malformed relative slash input should prepare a flat safe filename: \(item.0)")
+        _ = try await service.save(preparedFallback)
+        let fallbackContents = try checkRead(preparedFallback.destination.url)
+        try require(fallbackContents.hasPrefix("# \(item.0)\n\n<!-- note:"),
+                    "malformed relative slash input should save as an ordinary note: \(item.0)")
+    }
+    let tooDeepName = Array(repeating: "x", count: 33).joined(separator: "/")
+    let tooLongComponent = String(repeating: "x", count: 120)
+    let tooLongName = Array(repeating: tooLongComponent, count: 8).joined(separator: "/")
+    for (rawName, expectedError) in [
+        ("science/../escape", NotePathNameError.invalidComponent),
+        ("folder/ ../outside", NotePathNameError.invalidComponent),
+        ("folder/. /outside", NotePathNameError.invalidComponent),
+        ("/Desktop/../escape", NotePathNameError.invalidComponent),
+        ("folder/name\u{0000}", NotePathNameError.invalidComponent),
+        ("folder/~$draft", NotePathNameError.invalidComponent),
+        (tooDeepName, NotePathNameError.tooDeep),
+        (tooLongName, NotePathNameError.tooLong)
+    ] {
+        let typed = TypedNote(markdown: "# \(rawName)\nBody", createdAt: date, calendar: calendar)
+        try require(typed.pathName == nil && typed.pathNameError == expectedError,
+                    "explicit invalid path should retain its specific validation error: \(expectedError)")
+        let invalidCapture = Capture(id: UUID(), createdAt: date, content: .note("# \(rawName)\nBody"), source: CaptureSource())
+        do {
+            _ = try await service.prepareNote(invalidCapture, calendar: calendar)
+            throw CheckFailure.failed("invalid explicit path unexpectedly prepared: \(rawName)")
+        } catch let error as NotePathNameError {
+            try require(error == expectedError, "typed note path should throw \(expectedError), got \(error)")
+        }
+    }
     let pending = Capture(id: UUID(), createdAt: date, content: .note("Reserved title"), source: CaptureSource())
-    let pendingFirst = await service.prepareNote(pending, calendar: calendar)
-    let pendingNext = await service.prepareNote(Capture(id: UUID(), createdAt: date, content: pending.content, source: CaptureSource()), calendar: calendar)
+    let pendingFirst = try await service.prepareNote(pending, calendar: calendar)
+    let pendingNext = try await service.prepareNote(Capture(id: UUID(), createdAt: date, content: pending.content, source: CaptureSource()), calendar: calendar)
     try require(pendingFirst.destination.url.lastPathComponent == "Reserved title.md" && pendingNext.destination.url.lastPathComponent == "Reserved title 2.md",
                 "unsaved journal destinations must also reserve their filenames")
     let original = Capture(id: UUID(), createdAt: date, content: .note("# rootnoteneedle\n\nBody **untouched**"), source: CaptureSource())
-    let prepared = await service.prepareNote(original, calendar: calendar)
+    let prepared = try await service.prepareNote(original, calendar: calendar)
     try require(prepared.destination.url.lastPathComponent == "rootnoteneedle.md" && prepared.createsNote == true,
                 "outside-session typed note must choose a new root filename")
     _ = try await service.save(prepared)
@@ -117,22 +193,53 @@ private func checkIndependentNotes(vault: Vault, writer: NoteWriter, index: Sear
     let replayContents = try checkRead(prepared.destination.url)
     try require(replayContents == before && !FileManager.default.fileExists(atPath: vault.root.appendingPathComponent("rootnoteneedle 2.md").path),
                 "journaled replay must reuse its chosen path without creating a second file")
-    let collision = await service.prepareNote(Capture(id: UUID(), createdAt: date, content: original.content, source: CaptureSource()), calendar: calendar)
+    let collisionCapture = Capture(id: UUID(), createdAt: date, content: original.content, source: CaptureSource())
+    let collision = try await service.prepareNote(collisionCapture, calendar: calendar)
     _ = try await service.save(collision)
-    try require(collision.destination.url.lastPathComponent == "rootnoteneedle 2.md", "independent notes with the same title need the existing collision suffix")
+    let afterCollision = try checkRead(prepared.destination.url)
+    try require(collision.destination.url == prepared.destination.url && collision.createsNote != true && collision.noteMarkerIsIdentity == true,
+                "typed note collisions should append to the existing canonical target")
+    try require(afterCollision.components(separatedBy: "<!-- note:\(collisionCapture.id.uuidString.lowercased()) at=").count - 1 == 1,
+                "appending a typed note to an existing target should preserve its identity marker")
+    let journaledCollision = try JSONDecoder().decode(PreparedCapture.self, from: JSONEncoder().encode(collision))
+    _ = try await service.save(journaledCollision)
+    let afterCollisionReplay = try checkRead(prepared.destination.url)
+    try require(afterCollisionReplay == afterCollision,
+                "replaying an appended typed-note collision must not duplicate its marker")
+    var legacyObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(prepared)) as! [String: Any]
+    legacyObject.removeValue(forKey: "noteMarkerIsIdentity")
+    let legacyPrepared = try JSONDecoder().decode(PreparedCapture.self, from: JSONSerialization.data(withJSONObject: legacyObject))
+    try require(legacyPrepared.createsNote == true && legacyPrepared.noteMarkerIsIdentity == nil,
+                "older journal records without noteMarkerIsIdentity must continue to decode")
+
+    let nestedCapture = Capture(id: UUID(), createdAt: date,
+                                content: .note("# science/math/trigonometry\n\nNested typed body"), source: CaptureSource())
+    let nestedPrepared = try await service.prepareNote(nestedCapture, calendar: calendar)
+    try require(nestedPrepared.destination.url == vault.root.appendingPathComponent("science/math/trigonometry.md") &&
+                nestedPrepared.destination.title == "trigonometry",
+                "folder-qualified typed note should target the nested path and use its leaf title")
+    _ = try await service.save(nestedPrepared)
+    let nestedContents = try checkRead(nestedPrepared.destination.url)
+    try require(nestedContents.hasPrefix("# trigonometry\n") && nestedContents.contains("Nested typed body") &&
+                !nestedContents.contains("\n# science/math/trigonometry\n"),
+                "typed note path should determine a leaf-title header without duplicating the name in its body")
+    _ = try await index.sync()
+    let nestedHit = try await index.search("Nested typed body").first
+    try require(nestedHit?.notePath == "science/math/trigonometry.md" && nestedHit?.title == "trigonometry",
+                "nested typed note should be indexed at its relative path with its leaf title")
     // The persisted identity still denotes a saved note after external body edits.
-    let edited = before.replacingOccurrences(of: "Body **untouched**", with: "Edited body")
+    let edited = afterCollision.replacingOccurrences(of: "Body **untouched**", with: "Edited body")
     try checkWrite(edited, to: prepared.destination.url)
     _ = try await service.save(journaled)
     let editedReplay = try checkRead(prepared.destination.url)
     try require(editedReplay == edited, "existing new-note marker must make replay idempotent after edits")
-    let titleOnly = await service.prepareNote(Capture(id: UUID(), createdAt: date, content: .note("# titleonlyneedle"), source: CaptureSource()), calendar: calendar)
+    let titleOnly = try await service.prepareNote(Capture(id: UUID(), createdAt: date, content: .note("# titleonlyneedle"), source: CaptureSource()), calendar: calendar)
     _ = try await service.save(titleOnly)
     _ = try await index.sync()
     let hit = try await index.search("titleonlyneedle").first
     try require(hit?.title == "titleonlyneedle" && hit?.blockKind == .note && hit?.body == "", "marker-only notes must parse and be searchable by their title")
     _ = try await sessions.start(name: "Typed session")
-    let inSession = await service.prepareNote(original, calendar: calendar)
+    let inSession = try await service.prepareNote(original, calendar: calendar)
     try require(inSession.destination.kind == .session && inSession.capture.content == original.content && inSession.createsNote != true,
                 "session typed notes must retain their full body and append destination")
     print("Independent-note checks passed (title table/Unicode, first-line rules, creation/collisions, fixed-path replay, marker identity, title-only search, session routing).")

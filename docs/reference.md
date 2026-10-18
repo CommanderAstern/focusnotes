@@ -1,6 +1,6 @@
 # focusnotes reference
 
-Last Updated: 2026-10-17 (previous commit: `f3d72362bd81a0875523d78cab8ba06eed830604`)
+Last Updated: 2026-10-18 (previous commit: `962ea7d78abc0298c7d1a66063a3d24476c95d8e`)
 
 Detailed behaviour of capture, note storage and the quick-note editor. For setup, see the [README](../README.md).
 
@@ -37,10 +37,50 @@ Third paragraph.
 
 Browser suffixes are removed from source titles; empty titles fall back to the
 app, then “Unknown source”. Legacy dated capture blocks remain readable and are
-never rewritten. Session notes use `Sessions/<Title>.md`; starting the same cleaned
-filename again, ignoring case, resumes that note. Existing dated session notes
-can also resume in place. Images stay in `assets/`, with `../assets/` links from
-session notes.
+never rewritten. Session notes can live at any depth under `Sessions/`. A unique
+bare-name match resumes at its full path; several matches open a newest-first
+picker with title, path, and modified date. A slash-qualified name such as
+`archive/Standup` resolves directly under `Sessions/`; a missing qualified name
+creates that nested path. Escape cancels without changing session state. Existing
+dated session notes can also resume in place. Images stay in `assets/`, with
+relative `../assets/` links from session notes.
+
+### Quick-note paths
+
+A standalone quick note's derived title can include slash-separated folders.
+Relative paths are under the vault, so `science/math/trigonometry` saves to
+`<vault>/science/math/trigonometry.md`. A leading `/` resolves from the user's
+home folder: `/Desktop/science/math/trigonometry` saves to
+`~/Desktop/science/math/trigonometry.md`. Missing folders are created. Folder
+and existing filename matching is case-insensitive, and saving to an existing
+note appends the typed note to that file. Every valid unprefixed slash-separated
+name is folder syntax, including ambiguous prose or dates such as
+`pros/cons of X` and `10/18 standup`. For relative names, URLs, trailing/repeated
+separators, and whitespace adjacent to a slash use the legacy flat filename cleanup;
+malformed leading-slash HOME paths retain strict validation.
+
+Sessions keep their `Sessions/` namespace: a quick note saved while a session is
+active continues to append to that session note. Paths containing traversal
+components such as `..`, paths that cross a symbolic link, and leaves beginning
+with `~$` are rejected. The vault's `assets/` destination is reserved, matched
+case-insensitively; a home-relative path that resolves inside that directory is
+also rejected. Paths are limited to 32 components and 900 UTF-8 bytes.
+Vault notes are discovered recursively below the vault, with hidden files and
+the root-level directory named `assets` excluded case-insensitively; nested
+directories named `assets` remain ordinary note folders. Before writing to an
+external destination, Focusnotes records its exact HOME-relative Markdown path
+in a durable registry so journal replay can reuse the destination. The registry
+caches a validated path snapshot and generation, invalidated when its file or
+parent changes. At startup, safely readable notes at registered paths join the
+vault's discovered notes; missing or unreadable paths are skipped.
+Search indexes those paths, and the watcher monitors existing parent directories
+of registered external notes using bounded vnode sources; recursive FSEvents is
+limited to the vault. Missing parents are observed from their nearest existing
+ancestor, and only the registered paths are rechecked on an event. If the registry
+is malformed, unsupported, or unsafe, its bytes are preserved, external notes are
+hidden from search and new external saves are refused with a warning. Vault notes
+remain usable; a valid registry recovery restores external indexing and watching.
+Focusnotes does not scan HOME to discover external notes.
 
 Area OCR uses preferred supported languages with accurate recognition and
 language correction. Classification has a 1.5-second budget: slower OCR stages
@@ -60,10 +100,13 @@ written into the Markdown), and ⌘O saves like ⌘↩ then opens the note in yo
 Markdown app. ⌘N saves and opens a blank note. The caret and selection lines show dimmed syntax; other lines render
 without the syntax. Bullets display as •, and clickable task boxes support undo.
 The stored text stays Markdown. ⌘↩ (including keypad Enter) saves and appends to
-the active session; outside a session the footer says “Create note” and it creates a separate root note. Its title comes
-from the first non-empty line with Markdown removed, capped at a word boundary at
-60 characters (then “…”), or “Note yyyy-MM-dd HH.mm” if nothing remains. Filenames
-use the existing cleaning/collision rules (`Title.md`, `Title 2.md`). An ordinary
+the active session; outside a session the footer says “Create note” and it creates a separate note. Its name comes
+from the first non-empty line with Markdown removed, or “Note yyyy-MM-dd HH.mm”
+if nothing remains. An unqualified name keeps the 60-character display-title cap
+(then “…”). A path is parsed before display truncation: each component is cleaned
+and bounded to 120 characters and 220 UTF-8 bytes, while the displayed title is
+its sanitized final component, capped at 60 characters. Slashes in the name
+select the note's folder path as described above. An ordinary
 first line equal to the untruncated title is omitted from the body; lists, tasks,
 quotes and code stay intact. Captures and subheadings still use Inbox without a
 session. Return inserts a new line and continues lists (removing an empty marker);
