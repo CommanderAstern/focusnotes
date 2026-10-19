@@ -109,6 +109,16 @@ jobs:
         with:
           global-json-file: windows/global.json
 
+      - name: Cache OCR models
+        uses: actions/cache@v6
+        with:
+          path: windows/.ocr-models
+          key: ocr-models-${{ runner.os }}-${{ hashFiles('windows/src/CaptureApp.Platform/Ocr/ocr-models.json') }}
+
+      - name: Fetch and verify OCR models
+        shell: pwsh
+        run: ./scripts/fetch-ocr-models.ps1
+
       - name: Restore locked dependencies
         run: dotnet restore CaptureApp.sln --locked-mode
 
@@ -116,7 +126,23 @@ jobs:
         run: dotnet build CaptureApp.sln -c Release --no-restore -warnaserror
 
       - name: Test
+        env:
+          CAPTUREAPP_REQUIRE_OCR_MODELS: "1"
         run: dotnet test CaptureApp.sln -c Release --no-build
+
+      - name: Gallery
+        shell: pwsh
+        run: |
+          dotnet run --project src/CaptureApp.Gallery/CaptureApp.Gallery.csproj -c Release --no-build -- --check "$env:RUNNER_TEMP/gallery"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload gallery
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gallery-${{ matrix.runner }}
+          path: ${{ runner.temp }}/gallery
+          if-no-files-found: error
 
       - name: Probe runner desktop capabilities
         continue-on-error: true
