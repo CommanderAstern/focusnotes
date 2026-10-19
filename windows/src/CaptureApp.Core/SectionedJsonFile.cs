@@ -71,9 +71,12 @@ public static class SectionedJsonFile
         {
             try
             {
-                if (!File.Exists(fullPath)) { return []; }
                 text = File.ReadAllText(fullPath, Encoding.UTF8);
                 break;
+            }
+            catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+            {
+                return [];
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

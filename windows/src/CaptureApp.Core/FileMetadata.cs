@@ -110,17 +110,17 @@ internal sealed record FileMetadata(ulong Device, ulong Inode, long Size, long M
 
         var modified = basic.LastWriteTime - 116444736000000000L;
         var changed = basic.ChangeTime - 116444736000000000L;
-        // Only symlinks and junctions are links; other reparse points (OneDrive placeholders) are plain files.
+        // Only name-surrogate reparse points are links; other reparse points (OneDrive placeholders) are plain files.
         uint mode = (s.Attributes & 0x400) != 0 && IsLinkReparse(handle) ? 0xA000u : (s.Attributes & 0x10) != 0 ? 0x4000u : 0x8000u;
         return new(s.Volume, ((ulong)s.IndexHigh << 32) | s.IndexLow, ((long)s.SizeHigh << 32) | s.SizeLow, modified / 10000000, modified % 10000000 * 100, changed / 10000000, changed % 10000000 * 100, mode, s.Links, 0);
     }
 
     private static bool IsLinkReparse(SafeFileHandle handle)
     {
-        const uint symlink = 0xA000000C, mountPoint = 0xA0000003;
-        // Unknown tag: fail closed and treat it as a link.
+        // Name-surrogate tags (symlink, junction, LX symlink) redirect elsewhere; cloud tags do not.
+        // A failed query fails closed and counts as a link.
         return !Native.GetFileTagInfo(handle, 9, out var tag, (uint)Marshal.SizeOf<Native.TagInfo>())
-            || tag.ReparseTag is symlink or mountPoint;
+            || (tag.ReparseTag & 0x20000000) != 0;
     }
 
     private static class Native

@@ -665,24 +665,22 @@ public sealed class VaultWatcher : IDisposable
             }
 
             // Deliver outside the lock so observers can call back into the watcher.
-            try
+            while (true)
             {
-                while (true)
+                VaultChange next;
+                lock (gate)
                 {
-                    VaultChange next;
-                    lock (gate)
+                    // Release ownership in the same lock as the empty check, or a concurrent Publish is stranded.
+                    if (generation != epoch || !deliveries.TryDequeue(out next!))
                     {
-                        // Release ownership in the same lock as the empty check, or a concurrent Publish is stranded.
-                        if (generation != epoch || !deliveries.TryDequeue(out next!)) { deliveringEpoch = -1; return; }
+                        if (deliveringEpoch == generation) { deliveringEpoch = -1; }
+                        return;
                     }
-
-                    onChange(next);
                 }
-            }
-            catch
-            {
-                lock (gate) { deliveringEpoch = -1; }
-                throw;
+
+                // An observer failure must not crash the timer thread or stall later deliveries.
+                try { onChange(next); }
+                catch (Exception) { }
             }
         }, null, TimeSpan.Zero, Timeout.InfiniteTimeSpan);
     }

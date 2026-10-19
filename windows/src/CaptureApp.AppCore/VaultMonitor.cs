@@ -46,6 +46,9 @@ public sealed class VaultMonitor : IDisposable
     {
         lock (gate) { ObjectDisposedException.ThrowIf(stopped, this); }
         watcher.Start(); // Outside the gate: watcher deliveries take the gate on their own thread.
+        bool lostStop;
+        lock (gate) { lostStop = stopped; }
+        if (lostStop) { watcher.Stop(); } // StopAsync ran while Start was in flight.
     }
 
     public Task SyncAsync() => QueueRefresh(notes: true, assets: false, fullAssetValidation: false, []);

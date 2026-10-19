@@ -102,6 +102,7 @@ public sealed class SearchIndex : IDisposable
             }
 
             VaultFileSnapshot? snapshot;
+            var readFailed = false;
             try
             {
                 snapshot = vault.FileSnapshotForNoteId(note.Id);
@@ -109,11 +110,12 @@ public sealed class SearchIndex : IDisposable
             catch (Exception error) when (IsUnreadableFileError(error))
             {
                 snapshot = null;
+                readFailed = true;
             }
 
             if (snapshot?.Contents is not { } contents)
             {
-                previous.Remove(note.Id); // A failed read keeps the stale row instead of deleting it.
+                if (readFailed) { previous.Remove(note.Id); } // A failed read keeps the stale row; a vanished note is deleted.
                 continue;
             }
 

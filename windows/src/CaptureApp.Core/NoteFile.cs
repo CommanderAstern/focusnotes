@@ -94,31 +94,40 @@ public static class NoteFile
     public static void PrepareRoot(string root)
     {
         ValidateDirectory(root, true);
-        SweepStaleTemporaries(root);
+        if (SweptRoots.TryAdd(root, true)) { _ = Task.Run(() => SweepStaleTemporaries(root)); }
     }
 
     private static readonly ConcurrentDictionary<string, bool> SweptRoots = new(StringComparer.Ordinal);
     private static readonly System.Text.RegularExpressions.Regex PendingName = new(@"^\.pending-[0-9a-f]{32}$");
 
-    // Best effort, once per root per process: remove ".pending-<guid>" files that a crashed write left behind.
+    // Best effort: remove ".pending-<guid>" files that a crashed write left behind. Skips dot-directories,
+    // links and cloud placeholders (same attributes WatchSnapshot treats as online-only).
     internal static void SweepStaleTemporaries(string root, TimeSpan? olderThan = null)
     {
-        if (olderThan is null && !SweptRoots.TryAdd(root, true)) { return; }
         var cutoff = DateTime.UtcNow - (olderThan ?? TimeSpan.FromHours(1));
-        try
+        const FileAttributes skip = FileAttributes.ReparsePoint | FileAttributes.Offline | (FileAttributes)(0x400000 | 0x40000);
+        var options = new EnumerationOptions { AttributesToSkip = skip };
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.TryPop(out var directory))
         {
-            var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Offline };
-            foreach (var path in Directory.EnumerateFiles(root, ".pending-*", options))
+            try
             {
-                try
+                foreach (var path in Directory.EnumerateFileSystemEntries(directory, "*", options))
                 {
-                    if (PendingName.IsMatch(Path.GetFileName(path)) && File.GetLastWriteTimeUtc(path) < cutoff) { File.Delete(path); }
+                    var name = Path.GetFileName(path);
+                    try
+                    {
+                        if (Directory.Exists(path)) { if (!name.StartsWith('.')) { pending.Push(path); } }
+                        else if (PendingName.IsMatch(name) && File.GetLastWriteTimeUtc(path) < cutoff) { File.Delete(path); }
+                    }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
                 }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
             }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
+
     public static void PrepareManagedDirectory(string root, string relativePath)
     {
         var path = SafePath(root, relativePath + "/.directory-check", true);
