@@ -88,9 +88,36 @@ public sealed class MenuCaptureFlowTests
 
     private static async Task<(int Refused, int Captured)> Run(FakeProbe probe)
     {
-        int refused = 0, captured = 0;
-        await new MenuCaptureFlow(probe).RunAsync(() => refused++, _ => captured++, TimeSpan.FromMilliseconds(60));
+        var (refused, captured, _) = await RunDetailed(probe);
         return (refused, captured);
+    }
+
+    private static async Task<(int Refused, int Captured, bool? HadTarget)> RunDetailed(FakeProbe probe)
+    {
+        int refused = 0, captured = 0;
+        bool? hadTarget = null;
+        await new MenuCaptureFlow(probe).RunAsync(had => { refused++; hadTarget = had; }, _ => captured++, TimeSpan.FromMilliseconds(60));
+        return (refused, captured, hadTarget);
+    }
+
+    [Fact]
+    public async Task OnlyAMissingTargetIsNoTextSelected()
+    {
+        Assert.False((await RunDetailed(new FakeProbe { Last = 0 })).HadTarget);
+        Assert.True((await RunDetailed(new FakeProbe { Restorable = false })).HadTarget);
+        Assert.True((await RunDetailed(new FakeProbe { ForegroundWindow = () => 5 })).HadTarget);
+        Assert.True((await RunDetailed(new FakeProbe { ContextWindow = 5 })).HadTarget);
+    }
+
+    [Fact]
+    public void DesktopClearsTheTargetButOwnAndTrayWindowsKeepIt()
+    {
+        Assert.Equal(ForegroundTracker.Decision.Clear, ForegroundTracker.Decide(11, 10, "Progman"));
+        Assert.Equal(ForegroundTracker.Decision.Clear, ForegroundTracker.Decide(11, 10, "WorkerW"));
+        Assert.Equal(ForegroundTracker.Decision.Keep, ForegroundTracker.Decide(10, 10, "Notepad"));
+        Assert.Equal(ForegroundTracker.Decision.Keep, ForegroundTracker.Decide(11, 10, "Shell_TrayWnd"));
+        Assert.Equal(ForegroundTracker.Decision.Keep, ForegroundTracker.Decide(11, 10, "NotifyIconOverflowWindow"));
+        Assert.Equal(ForegroundTracker.Decision.Track, ForegroundTracker.Decide(11, 10, "Notepad"));
     }
 
     [Fact]

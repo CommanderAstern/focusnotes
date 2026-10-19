@@ -168,7 +168,9 @@ internal sealed partial class AppController
         try
         {
             await menuCapture.RunAsync(
-                () => Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea)))),
+                hadTarget => Coordinator.ShowToast(hadTarget
+                    ? new(AppToastStyle.Warning, PlatformStrings.CouldNotCapture)
+                    : new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea)))),
                 context => Capture(CaptureTrigger.Selection, false, context));
         }
         catch (Exception error)

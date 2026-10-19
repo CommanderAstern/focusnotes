@@ -100,6 +100,7 @@ internal sealed partial class AppController
     private void SelectionFailed(SelectionResult result)
     {
         if (result.Failure is SelectionFailure.OwnApp or SelectionFailure.Busy or SelectionFailure.Cancelled or null) { return; }
+        log.Notice($"Selection capture refused: {result.Failure}{(result.Detail is { } detail ? $" ({detail})" : "")}");
         var area = BindingText(HotkeyAction.CaptureArea);
         var title = result.Message ?? PlatformStrings.NoTextSelected;
         var subtitle = result.HintForCaptureArea(area);

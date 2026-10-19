@@ -24,9 +24,21 @@ internal sealed class ForegroundTracker : IDisposable
         if (hook == 0) { log?.Invoke("The foreground window hook could not be installed; tray Capture Selection has no target."); }
     }
 
+    private static readonly string[] DesktopClasses = ["Progman", "WorkerW"];
+
+    /// Track: remember it. Keep: ignore (our own windows and the tray windows the menu opens). Clear: the user went to the desktop.
+    public static Decision Decide(uint processId, uint ownProcessId, string? className)
+    {
+        if (className is not null && DesktopClasses.Contains(className, StringComparer.Ordinal)) { return Decision.Clear; }
+        if (processId == 0 || processId == ownProcessId || IsShellClass(className)) { return Decision.Keep; }
+        return Decision.Track;
+    }
+
+    public enum Decision { Track, Keep, Clear }
+
     /// Our own windows and the shell are never targets.
     public static bool ShouldTrack(uint processId, uint ownProcessId, string? className) =>
-        processId != 0 && processId != ownProcessId && !IsShellClass(className);
+        Decide(processId, ownProcessId, className) == Decision.Track;
 
     /// The last tracked window, or 0.
     public nint Last => (nint)Interlocked.Read(ref last);
@@ -45,8 +57,11 @@ internal sealed class ForegroundTracker : IDisposable
         _ = GetWindowThreadProcessId(window, out var pid);
         var name = new StringBuilder(256);
         var className = GetClassName(window, name, name.Capacity) > 0 ? name.ToString() : null;
-        if (!ShouldTrack(pid, (uint)Environment.ProcessId, className)) { return; }
-        Interlocked.Exchange(ref last, window);
+        switch (Decide(pid, (uint)Environment.ProcessId, className))
+        {
+            case Decision.Track: Interlocked.Exchange(ref last, window); break;
+            case Decision.Clear: Interlocked.Exchange(ref last, 0); break;
+        }
     }
 
     public void Dispose()
