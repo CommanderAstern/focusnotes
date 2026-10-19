@@ -99,6 +99,59 @@ public sealed class SelectionLogicTests
     }
 
     [Fact]
+    public async Task UnknownWithChangedForegroundIsTargetChanged()
+    {
+        var fake = new FakeServices { Safety = FieldSafety.Unknown };
+        fake.OnSafetyRead = () => fake.Frontmost = false;
+        Assert.Equal(SelectionFailure.TargetChanged, (await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken)).Failure);
+    }
+
+    [Fact]
+    public async Task UnknownWithModifiersHeldIsModifiersHeld()
+    {
+        var fake = new FakeServices { Safety = FieldSafety.Unknown, ModifiersHeld = true };
+        Assert.Equal(SelectionFailure.ModifiersHeld, (await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken)).Failure);
+    }
+
+    [Fact]
+    public async Task UnknownOtherwiseIsUndeterminedWithCouldNotCaptureMessage()
+    {
+        var result = await new SelectionReader(new FakeServices { Safety = FieldSafety.Unknown }).ReadAsync(true, Target, TestContext.Current.CancellationToken);
+        Assert.Equal(SelectionFailure.SelectionUndetermined, result.Failure);
+        Assert.Equal("Couldn't capture selection", result.Message);
+    }
+
+    [Fact]
+    public async Task CouldNotOpenThenTargetCopyLandsIsCapturedAndRestored()
+    {
+        var fake = new FakeServices();
+        fake.CopyScript.Enqueue(new(null, 0, false, NotOpened: true));
+        var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
+        Assert.Equal("copied", result.Capture?.Text);
+        Assert.Equal(1, fake.Restores);
+    }
+
+    [Fact]
+    public async Task CouldNotOpenUntilDeadlineStillRestoresLateCopy()
+    {
+        var fake = new FakeServices();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        // The target releases the clipboard only after the 500 ms loop deadline: the late check must find and restore it.
+        fake.CopyFactory = () => clock.ElapsedMilliseconds < 520 ? new(null, 0, false, NotOpened: true) : new("late", 11, true);
+        var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
+        Assert.Equal(SelectionFailure.NoSelection, result.Failure);
+        Assert.Equal(1, fake.Restores);
+    }
+
+    [Fact]
+    public async Task ForeignOwnerCopyIsNeverRestored()
+    {
+        var fake = new FakeServices { TargetOwnsCopy = false };
+        Assert.Equal(SelectionFailure.NoSelection, (await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken)).Failure);
+        Assert.Equal(0, fake.Restores);
+    }
+
+    [Fact]
     public async Task HeldModifiersHaveBoundedWaitAndExactMessage()
     {
         var fake = new FakeServices { ModifiersHeld = true };
@@ -130,7 +183,7 @@ public sealed class SelectionLogicTests
 
     [Theory]
     [InlineData((int)SnapshotFailure.TooLarge, SelectionFailure.ClipboardTooLarge)]
-    [InlineData((int)SnapshotFailure.TimedOut, SelectionFailure.ClipboardTooLarge)]
+    [InlineData((int)SnapshotFailure.TimedOut, SelectionFailure.ClipboardUnsafe)]
     [InlineData((int)SnapshotFailure.Unavailable, SelectionFailure.ClipboardUnsafe)]
     [InlineData((int)SnapshotFailure.Changed, SelectionFailure.ClipboardUnsafe)]
     public async Task UnsafeSnapshotsAbortBeforeInjection(int snapshotFailureValue, SelectionFailure failure)
@@ -234,6 +287,9 @@ public sealed class SelectionLogicTests
         internal bool Restored;
         internal bool TargetOwnsCopy = true;
         internal SnapshotFailure SnapshotFailure;
+        internal Queue<ClipboardCopy> CopyScript = new();
+        internal Func<ClipboardCopy?>? CopyFactory;
+        internal Action? OnSafetyRead;
         internal Func<SelectionCheckpoint, Task>? Hook;
         public bool ModifiersHeld { get; set; }
         public uint ClipboardSequence { get; set; } = 10;
@@ -242,7 +298,7 @@ public sealed class SelectionLogicTests
         public bool IsElevated(uint pid) => Elevated;
         public Task<UiaRead> ReadUiaAsync(uint pid, bool selection, CancellationToken token)
         {
-            if (!selection) checks++;
+            if (!selection) { checks++; OnSafetyRead?.Invoke(); }
             return Task.FromResult(new UiaRead(PasswordAtCheck == checks && checks > 0 ? FieldSafety.Password : Safety, selection ? Text : null));
         }
         public Task<SnapshotResult> SnapshotAsync(CancellationToken token)
@@ -251,7 +307,7 @@ public sealed class SelectionLogicTests
             return Task.FromResult(SnapshotFailure == SnapshotFailure.None ? new SnapshotResult(new(ClipboardSequence, []), SnapshotFailure.None) : new(null, SnapshotFailure));
         }
         public bool InjectCopy() { Injections++; ClipboardSequence++; return true; }
-        public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => Task.FromResult<ClipboardCopy?>(new("copied", ClipboardSequence, TargetOwnsCopy));
+        public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => Task.FromResult<ClipboardCopy?>(CopyFactory is not null ? CopyFactory() : CopyScript.Count > 0 ? CopyScript.Dequeue() : new("copied", ClipboardSequence, TargetOwnsCopy));
         public ClipboardRestore Restore(ClipboardSnapshot snapshot, uint sequence)
         { Restores++; Restored = sequence == ClipboardSequence; return new(Restored, TimeSpan.Zero); }
         public Task CheckpointAsync(SelectionCheckpoint checkpoint) => Hook?.Invoke(checkpoint) ?? Task.CompletedTask;

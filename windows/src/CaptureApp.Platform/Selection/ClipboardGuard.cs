@@ -4,7 +4,7 @@ using System.Text;
 
 namespace CaptureApp.Platform.Selection;
 
-internal sealed record ClipboardCopy(string? Text, uint Sequence, bool TargetOwned);
+internal sealed record ClipboardCopy(string? Text, uint Sequence, bool TargetOwned, bool NotOpened = false);
 internal sealed record ClipboardRestore(bool Restored, TimeSpan HoldTime);
 
 /// <summary>All mutations are confined to Restore, after a sequence check with the clipboard locked.</summary>
@@ -58,7 +58,7 @@ internal sealed class ClipboardGuard
 
     private ClipboardCopy ReadCopy(uint targetPid)
     {
-        if (!TryOpen(listener.Window)) return new(null, 0, false);
+        if (!TryOpen(listener.Window)) return new(null, 0, false, NotOpened: true); // Not a foreign owner: the target may still hold it.
         try
         {
             _ = NativeMethods.GetWindowThreadProcessId(NativeMethods.GetClipboardOwner(), out var ownerPid);

@@ -124,11 +124,10 @@ public sealed class SelectionReader
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4
             var afterModifiers = await SafetyAsync(context, "G3 after modifiers", cancellationToken).ConfigureAwait(false);
             if (afterModifiers is not null) return afterModifiers;
-            var signal = services.ClipboardSignal; // Listener must be installed before snapshot/injection.
             using var snapshotResult = await services.SnapshotAsync(cancellationToken).ConfigureAwait(false); // G10
             cancellationToken.ThrowIfCancellationRequested();
             if (snapshotResult.Snapshot is not { } snapshot)
-                return SelectionResult.Refuse(snapshotResult.Failure is SnapshotFailure.TooLarge or SnapshotFailure.TimedOut
+                return SelectionResult.Refuse(snapshotResult.Failure is SnapshotFailure.TooLarge
                     ? SelectionFailure.ClipboardTooLarge : SelectionFailure.ClipboardUnsafe);
             await services.CheckpointAsync(SelectionCheckpoint.AfterSnapshot).ConfigureAwait(false);
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4 before G3: a focus switch is not a secure field
@@ -141,6 +140,7 @@ public sealed class SelectionReader
             if (services.ModifiersHeld) return SelectionResult.Refuse(SelectionFailure.ModifiersHeld);
             if (services.ClipboardSequence != snapshot.Sequence) return SelectionResult.Refuse(SelectionFailure.ClipboardUnsafe); // G7
 
+            var signal = services.ClipboardSignal; // Read after the last pre-injection checks so earlier signals don't count.
             uint? restoreSequence = null;
             try
             {
@@ -153,7 +153,8 @@ public sealed class SelectionReader
                     {
                         var copy = await services.ReadCopyAsync(context.ProcessIdentifier,
                             TimeSpan.FromMilliseconds(500) - wait.Elapsed, snapshot).ConfigureAwait(false);
-                        if (copy is null) return SelectionResult.Refuse(SelectionFailure.NoSelection);
+                        if (copy is null) break; // Out of time or abandoned: the late check below still restores.
+                        if (copy.NotOpened) { await Task.Delay(10).ConfigureAwait(false); continue; } // Target may hold the clipboard open (Office): keep polling.
                         if (!copy.TargetOwned) return SelectionResult.Refuse(SelectionFailure.NoSelection);
                         if (copy.Sequence != snapshot.Sequence)
                         {
@@ -181,7 +182,12 @@ public sealed class SelectionReader
                 if (restoreSequence is { } expected)
                 {
                     await services.CheckpointAsync(SelectionCheckpoint.BeforeRestore).ConfigureAwait(false);
-                    _ = services.Restore(snapshot, expected);
+                    // A transient lock can fail the restore; retry briefly. A sequence mismatch (newer copy) just fails again, harmlessly.
+                    for (var attempt = 0; attempt < 3; attempt++)
+                    {
+                        if (services.Restore(snapshot, expected).Restored) break;
+                        if (attempt < 2) await Task.Delay(20).ConfigureAwait(false);
+                    }
                 }
             }
         }
