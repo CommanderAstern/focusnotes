@@ -38,7 +38,8 @@ internal sealed partial class AppController : IDisposable
     private PowerMonitor? power;
     private SemanticIndexer? semantic;
     private bool openedSetupThisLaunch;
-    private readonly ForegroundTracker foreground = new();
+    private readonly ForegroundTracker foreground;
+    private readonly MenuCaptureFlow menuCapture;
     private readonly FocusReturnTracker focusProbe = new();
     private bool quitting;
     private bool disposed;
@@ -50,12 +51,14 @@ internal sealed partial class AppController : IDisposable
         this.stateDirectory = stateDirectory;
         this.firstRun = firstRun;
         log = new(stateDirectory, "app");
+        foreground = new ForegroundTracker(message => log.Error(message));
         SettingsPath = Path.Combine(stateDirectory, "settings.json");
         Settings = new SettingsStore(SettingsPath);
         Setup = new SetupState(Settings);
         BindingStore = new HotkeyBindingStore(SettingsPath);
         LoginItem = new LoginItem();
         Ocr = new Lazy<RapidOcrEngine>(() => new RapidOcrEngine());
+        menuCapture = new MenuCaptureFlow(new WindowsForegroundProbe(foreground, focusProbe));
     }
 
     public string SettingsPath { get; }

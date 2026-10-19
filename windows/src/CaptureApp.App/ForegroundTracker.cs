@@ -17,11 +17,16 @@ internal sealed class ForegroundTracker : IDisposable
     private readonly nint hook;
     private long last;
 
-    public ForegroundTracker()
+    public ForegroundTracker(Action<string>? log = null)
     {
         callback = OnEvent;
         hook = SetWinEventHook(EventSystemForeground, EventSystemForeground, 0, callback, 0, 0, WinEventOutOfContext);
+        if (hook == 0) { log?.Invoke("The foreground window hook could not be installed; tray Capture Selection has no target."); }
     }
+
+    /// Our own windows and the shell are never targets.
+    public static bool ShouldTrack(uint processId, uint ownProcessId, string? className) =>
+        processId != 0 && processId != ownProcessId && !IsShellClass(className);
 
     /// The last tracked window, or 0.
     public nint Last => (nint)Interlocked.Read(ref last);
@@ -38,9 +43,9 @@ internal sealed class ForegroundTracker : IDisposable
     {
         if (window == 0 || objectId != 0) { return; }
         _ = GetWindowThreadProcessId(window, out var pid);
-        if (pid == 0 || pid == (uint)Environment.ProcessId) { return; }
         var name = new StringBuilder(256);
-        if (GetClassName(window, name, name.Capacity) > 0 && IsShellClass(name.ToString())) { return; }
+        var className = GetClassName(window, name, name.Capacity) > 0 ? name.ToString() : null;
+        if (!ShouldTrack(pid, (uint)Environment.ProcessId, className)) { return; }
         Interlocked.Exchange(ref last, window);
     }
 

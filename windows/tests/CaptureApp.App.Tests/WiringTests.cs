@@ -70,3 +70,67 @@ public sealed class ForegroundTrackerTests
     public void ShellClassesAreNeverCaptureTargets(string? className, bool isShell) =>
         Assert.Equal(isShell, ForegroundTracker.IsShellClass(className));
 }
+
+public sealed class MenuCaptureFlowTests
+{
+    private sealed class FakeProbe : IForegroundProbe
+    {
+        public nint Last { get; set; } = 100;
+        public bool Restorable { get; set; } = true;
+        public Func<nint> ForegroundWindow { get; set; } = () => 100;
+        public nint ContextWindow { get; set; } = 100;
+        public int Brought { get; private set; }
+        public bool CanRestore(nint window) => Restorable;
+        public void BringToForeground(nint window) => Brought++;
+        public nint Foreground() => ForegroundWindow();
+        public CaptureApp.Platform.Context.FrontmostContext CaptureContext() => new(ContextWindow, 7);
+    }
+
+    private static async Task<(int Refused, int Captured)> Run(FakeProbe probe)
+    {
+        int refused = 0, captured = 0;
+        await new MenuCaptureFlow(probe).RunAsync(() => refused++, _ => captured++, TimeSpan.FromMilliseconds(60));
+        return (refused, captured);
+    }
+
+    [Fact]
+    public async Task HappyPathCapturesTheTargetWindow()
+    {
+        var probe = new FakeProbe();
+        Assert.Equal((0, 1), await Run(probe));
+        Assert.Equal(1, probe.Brought);
+    }
+
+    [Fact]
+    public async Task NoTargetOrUnrestorableTargetRefusesWithoutTouchingFocus()
+    {
+        var none = new FakeProbe { Last = 0 };
+        Assert.Equal((1, 0), await Run(none));
+        var gone = new FakeProbe { Restorable = false };
+        Assert.Equal((1, 0), await Run(gone));
+        Assert.Equal(0, none.Brought + gone.Brought);
+    }
+
+    [Fact]
+    public async Task TargetThatNeverComesForegroundRefusesAfterTheDeadline()
+    {
+        var probe = new FakeProbe { ForegroundWindow = () => 5 };
+        Assert.Equal((1, 0), await Run(probe));
+    }
+
+    [Fact]
+    public async Task ForegroundChangingBeforeTheContextReadRefuses()
+    {
+        var probe = new FakeProbe { ContextWindow = 5 };
+        Assert.Equal((1, 0), await Run(probe));
+    }
+
+    [Fact]
+    public void OwnProcessAndShellWindowsAreNotTracked()
+    {
+        Assert.False(ForegroundTracker.ShouldTrack(10, 10, "Notepad"));
+        Assert.False(ForegroundTracker.ShouldTrack(0, 10, "Notepad"));
+        Assert.False(ForegroundTracker.ShouldTrack(11, 10, "Shell_TrayWnd"));
+        Assert.True(ForegroundTracker.ShouldTrack(11, 10, "Notepad"));
+    }
+}

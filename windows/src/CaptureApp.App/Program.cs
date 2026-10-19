@@ -77,6 +77,18 @@ internal static class Program
         {
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(app.Dispatcher));
+            var crashLog = new AppLog(state, "unhandled");
+            app.DispatcherUnhandledException += (_, e) =>
+            {
+                crashLog.Error($"Unhandled UI exception: {e.Exception}");
+                // Corrupted-state failures must not be swallowed.
+                e.Handled = e.Exception is not (OutOfMemoryException or AccessViolationException or InsufficientExecutionStackException);
+            };
+            TaskScheduler.UnobservedTaskException += (_, e) =>
+            {
+                crashLog.Error($"Unobserved task exception: {e.Exception}");
+                e.SetObserved();
+            };
             using var theme = new ThemeManager(app.Resources);
             controller = new AppController(app, state, UpdateBootstrap.IsFirstRun);
             app.Dispatcher.InvokeAsync(async () =>

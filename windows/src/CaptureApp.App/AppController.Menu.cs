@@ -154,30 +154,27 @@ internal sealed partial class AppController
     private void AfterMenu(Action action)
     {
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-        timer.Tick += (_, _) => { timer.Stop(); action(); };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            try { action(); }
+            catch (Exception error) { log.Error($"Tray command failed ({error.GetType().Name}): {error}"); }
+        };
         timer.Start();
     }
 
-    /// Returns to the app the user was in before the tray menu took the foreground, then runs the normal capture.
     private async Task CaptureSelectionFromMenuAsync()
     {
-        var target = foreground.Last;
-        if (target == 0 || !focusProbe.CanRestore(target))
+        try
         {
-            Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea))));
-            return;
+            await menuCapture.RunAsync(
+                () => Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea)))),
+                context => Capture(CaptureTrigger.Selection, false, context));
         }
-
-        // The menu click was the last input, so Windows lets us hand the foreground back.
-        ForegroundTracker.BringToForeground(target);
-        for (var waited = 0; waited < 300 && ForegroundTracker.Foreground() != target; waited += 10) { await Task.Delay(10); }
-        if (ForegroundTracker.Foreground() != target)
+        catch (Exception error)
         {
-            Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea))));
-            return;
+            log.Error($"Tray Capture Selection failed ({error.GetType().Name}): {error}");
         }
-
-        Capture(CaptureTrigger.Selection, false, FrontmostContext.Capture());
     }
 
     private void OpenNotesFolder()
