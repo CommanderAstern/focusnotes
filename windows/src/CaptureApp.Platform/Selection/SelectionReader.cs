@@ -132,6 +132,7 @@ public sealed class SelectionReader
                 return SelectionResult.Refuse(snapshotResult.Failure is SnapshotFailure.TooLarge or SnapshotFailure.TimedOut
                     ? SelectionFailure.ClipboardTooLarge : SelectionFailure.ClipboardUnsafe);
             await services.CheckpointAsync(SelectionCheckpoint.AfterSnapshot).ConfigureAwait(false);
+            if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4 before G3: a focus switch is not a secure field
             var beforePost = await SafetyAsync(context, cancellationToken).ConfigureAwait(false); // G3 before post
             if (beforePost is not null) return SelectionResult.Refuse(beforePost.Value);
             if (services.IsElevated(context.ProcessIdentifier)) return SelectionResult.Refuse(SelectionFailure.ElevatedTarget);

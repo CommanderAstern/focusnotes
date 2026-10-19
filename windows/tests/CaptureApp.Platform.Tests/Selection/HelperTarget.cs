@@ -94,15 +94,30 @@ internal sealed class HelperTarget : IAsyncDisposable
 
     internal async Task FocusAsync(string field = "first")
     {
-        // Foreground changes can lose a race with the previous window's teardown; retry briefly.
+        // Foreground changes can lose a race with the previous window's teardown, and the foreground lock blocks
+        // background processes; own the last input event, grant the helper the right, then retry briefly.
         var foreground = false;
         for (var attempt = 0; attempt < 5 && !foreground; attempt++)
         {
+            Win32.keybd_event(0xE8, 0, 0, 0); // VK_NONAME: no-op key that makes this process the last-input owner.
+            Win32.keybd_event(0xE8, 0, 2, 0);
             _ = NativeMethods.AllowSetForegroundWindow((uint)process.Id);
             foreground = (await CommandAsync("focus", field)).Foreground;
+            if (!foreground)
+            {
+                // Attach to the current foreground thread's input queue so the helper's retry is allowed.
+                var current = NativeMethods.GetForegroundWindow();
+                var foregroundThread = current == 0 ? 0 : Win32.GetWindowThreadProcessId(current, out _);
+                var self = Win32.GetCurrentThreadId();
+                var attached = foregroundThread != 0 && foregroundThread != self && Win32.AttachThreadInput(self, foregroundThread, true);
+                try { foreground = (await CommandAsync("focus", field)).Foreground; }
+                finally { if (attached) _ = Win32.AttachThreadInput(self, foregroundThread, false); }
+            }
             if (!foreground) await Task.Delay(100, TestContext.Current.CancellationToken);
         }
-        Assert.True(foreground, "SetForegroundWindow probe succeeded, but the helper could not become foreground.");
+        var owner = NativeMethods.GetForegroundWindow();
+        _ = Win32.GetWindowThreadProcessId(owner, out var ownerPid);
+        Assert.True(foreground, $"SetForegroundWindow probe succeeded, but the helper could not become foreground (foreground window 0x{owner:X} owned by pid {ownerPid}, helper pid {process.Id}).");
         await Task.Delay(30, TestContext.Current.CancellationToken);
     }
 
@@ -126,6 +141,16 @@ internal sealed class HelperTarget : IAsyncDisposable
         writer?.Dispose(); reader?.Dispose(); pipe.Dispose(); process.Dispose();
     }
 }
+
+#pragma warning disable SYSLIB1054 // Blittable test-only imports.
+internal static class Win32
+{
+    [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern void keybd_event(byte key, byte scan, uint flags, nuint extra);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(nint window, out uint pid);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] internal static extern bool AttachThreadInput(uint from, uint to, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] bool attach);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+}
+#pragma warning restore SYSLIB1054
 
 /// <summary>The quick capability probe uses a window belonging to this very test process.</summary>
 internal sealed class DesktopProbe : IAsyncDisposable
