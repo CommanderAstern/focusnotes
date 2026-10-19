@@ -1,6 +1,6 @@
 # Design
 
-Last Updated: 2026-10-19 (previous commit: `52caca612ad76a60be44ed72dbf03ca12491dccc`)
+Last Updated: 2026-10-19 (previous commit: `cbf3858d0a6c2d59746e12585f35b8be965f4b7b`)
 
 ## Product surfaces
 
@@ -130,7 +130,7 @@ Each difference below is intentional, has a cited platform cause, and is checked
 | DV1 | Interactive panels activate for typing instead of borrowing focus; button clicks do not activate. | Same end state; while typing, the other app shows as inactive and may close an open dropdown. |
 | DV2 | Selection capture cannot read apps running as administrator (Windows blocks it for a normal-integrity app). | A toast points to Capture Area, which still works. |
 | DV3 | Different default shortcuts, plus rebinding. | Same seven actions. |
-| DV4 | A different OCR engine (PaddleOCR through ONNX Runtime). | Recognised text can differ slightly. |
+| DV4 | The English-first Windows POC uses RapidOcrNet's bundled PP-OCRv5 Latin set through ONNX Runtime. | Multilingual language selection is deferred; recognised text can differ slightly from the Mac. |
 | DV5 | No thermal signal exists. | Background embedding runs at low priority with EcoQoS instead of waiting on temperature. |
 | DV6 | A stricter clipboard fallback: it aborts if the clipboard is too large or unreadable, or while keys are held. | A refusal toast where the Mac would capture. |
 | DV7 | Windows file-name rules reject names the Mac accepts (`CON`, `a:b`, a trailing dot). | The same reserved-name message. |

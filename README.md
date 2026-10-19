@@ -160,8 +160,9 @@ you can install.
   update channel.
 - **Same behaviour, Windows mechanics.** The same seven actions, sessions, search, toasts and plain-Markdown vault.
   The vault layer is checked against the same shared fixtures as the Mac app (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-  Selection capture uses UI Automation, with an opt-in clipboard fallback. Area capture and OCR run on the device
-  with bundled PaddleOCR models; nothing leaves your PC.
+  Selection capture uses UI Automation, with an opt-in clipboard fallback. Area OCR runs locally with RapidOcrNet's
+  bundled PP-OCRv5 Latin models; this Windows POC is English-first, with multilingual coverage deferred. OCR models
+  ship with the app and are not downloaded at runtime; captured images stay on your PC.
 - **Tray, not menu bar.** The app lives in the notification area and has no taskbar button or main window. On
   Windows 11 a new tray icon may start in the overflow flyout; drag it out (Settings → Personalization → Taskbar →
   Other system tray icons).

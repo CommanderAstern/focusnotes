@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Builds one architecture's Velopack release: models, self-contained publish, vpk pack.
+Builds one architecture's Velopack release: self-contained publish and vpk pack.
 
 .PARAMETER Arch
 x64 or arm64. Build on a matching runner (windows-latest / windows-11-arm).
@@ -52,7 +52,6 @@ foreach ($path in @($archOut, $publishDir)) {
 
 Push-Location $windowsDirectory
 try {
-    & (Join-Path $scriptDirectory 'fetch-ocr-models.ps1')
     Invoke-Checked 'dotnet tool restore' { dotnet tool restore }
 
     $publishArgs = @('publish', 'src/CaptureApp.App/CaptureApp.App.csproj', '-c', 'Release', '-r', $rid, '--self-contained', 'true', '-o', $publishDir, "-p:Version=$Version")

@@ -282,12 +282,6 @@ jobs:
         with:
           global-json-file: windows/global.json
 
-      - name: Cache OCR models
-        uses: actions/cache@v6
-        with:
-          path: windows/.ocr-models
-          key: ocr-models-${{ runner.os }}-${{ hashFiles('windows/src/CaptureApp.Platform/Ocr/ocr-models.json') }}
-
       - name: Pack
         shell: pwsh
         env:

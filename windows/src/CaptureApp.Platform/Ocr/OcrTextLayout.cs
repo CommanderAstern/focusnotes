@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 
 namespace CaptureApp.Platform.Ocr;
@@ -49,19 +48,6 @@ public static class OcrTextLayout
             }
 
             output.Append(lines[index].Text);
-        }
-
-        return output.ToString();
-    }
-
-    public static string ReverseTextElements(string text)
-    {
-        var starts = StringInfo.ParseCombiningCharacters(text);
-        var output = new StringBuilder(text.Length);
-        for (var index = starts.Length - 1; index >= 0; index--)
-        {
-            var end = index + 1 < starts.Length ? starts[index + 1] : text.Length;
-            output.Append(text.AsSpan(starts[index], end - starts[index]));
         }
 
         return output.ToString();

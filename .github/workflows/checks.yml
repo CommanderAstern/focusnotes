@@ -109,16 +109,6 @@ jobs:
         with:
           global-json-file: windows/global.json
 
-      - name: Cache OCR models
-        uses: actions/cache@v6
-        with:
-          path: windows/.ocr-models
-          key: ocr-models-${{ runner.os }}-${{ hashFiles('windows/src/CaptureApp.Platform/Ocr/ocr-models.json') }}
-
-      - name: Fetch and verify OCR models
-        shell: pwsh
-        run: ./scripts/fetch-ocr-models.ps1
-
       - name: Cache semantic models
         uses: actions/cache@v6
         with:
@@ -222,12 +212,6 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: windows/global.json
-
-      - name: Cache OCR models
-        uses: actions/cache@v6
-        with:
-          path: windows/.ocr-models
-          key: ocr-models-${{ runner.os }}-${{ hashFiles('windows/src/CaptureApp.Platform/Ocr/ocr-models.json') }}
 
       - name: Pack two CI versions
         shell: pwsh

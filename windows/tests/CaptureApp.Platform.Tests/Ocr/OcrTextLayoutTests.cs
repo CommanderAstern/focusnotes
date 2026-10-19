@@ -20,10 +20,4 @@ public sealed class OcrTextLayoutTests
         Assert.Equal(new[] { "left top", "right top", "bottom" }, ordered.Select(line => line.Text));
         Assert.Equal("left top\nright top\n\nbottom", OcrTextLayout.JoinText(ordered));
     }
-
-    [Fact]
-    public void ArabicVisualOrderFixReversesGraphemeClusters()
-    {
-        Assert.Equal("ﻡَﻼﺳ", OcrTextLayout.ReverseTextElements("ﺳﻼﻡَ"));
-    }
 }

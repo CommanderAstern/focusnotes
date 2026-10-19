@@ -1,9 +1,11 @@
 # Third-party notices
 
+Last Updated: 2026-10-19 (previous commit: `cbf3858d0a6c2d59746e12585f35b8be965f4b7b`)
+
 This file records third-party components included in the source tree or
-obtained by the in-app model downloader, or by `scripts/fetch-models.sh` for
-developers and CI. Each component remains subject to
-its own upstream license. Project-owned code is licensed under MIT; see
+shipped with the app, and models obtained by the optional semantic-search
+downloader or model-fetch scripts for developers and CI. Each component remains
+subject to its own upstream license. Project-owned code is licensed under MIT; see
 [`LICENSE`](LICENSE). The project license does not replace upstream licenses
 for third-party components.
 
@@ -82,7 +84,7 @@ Foundation libraries (MIT, Microsoft Corporation) are bundled with it.
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`Microsoft.ML.OnnxRuntime`, `.Managed`), win-x64 and win-arm64 | 1.31.0 | MIT | Runs the OCR and embedding models. Same upstream release as the macOS runtime above, bundled in the installer instead of downloaded. |
 | [RapidOcrNet](https://github.com/BobLd/RapidOcrNet) | 4.2.0 | Apache-2.0 | .NET wrapper around the PaddleOCR detection, classification and recognition pipeline. |
 | [Clipper2](https://github.com/AngusJohnson/Clipper2) (`Clipper2`, a RapidOcrNet dependency) | 2.0.0 | Boost Software License 1.0 | Polygon geometry for OCR text boxes. |
-| [PaddleOCR PP-OCRv5](https://github.com/PaddlePaddle/PaddleOCR) models, ONNX conversions published by [RapidAI/RapidOCR](https://www.modelscope.cn/models/RapidAI/RapidOCR) | release `v3.10.0` | Apache-2.0 | Text detection, orientation classification and recognition. Each model and dictionary is pinned by URL, byte size and SHA-256 in `windows/src/CaptureApp.Platform/Ocr/ocr-models.json`; the build fetches and verifies them, and they ship inside the installer. |
+| [PaddleOCR PP-OCRv5 Latin model assets](https://github.com/PaddlePaddle/PaddleOCR), distributed in the [RapidOcrNet 4.2.0 NuGet package](https://www.nuget.org/packages/RapidOcrNet/4.2.0) with ONNX conversions from [RapidAI/RapidOCR](https://github.com/RapidAI/RapidOCR) | RapidOcrNet 4.2.0 bundled defaults | Apache-2.0 | The default detector, orientation classifier, Latin recognizer and dictionary provide English-first OCR. These assets are supplied by NuGet and ship with the Windows installer; the app does not fetch separate OCR models. See the [PaddleOCR license](https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE). |
 | [SQLitePCLRaw](https://github.com/ericsink/SQLitePCL.raw) (`bundle_e_sqlite3`, `core`, `provider.e_sqlite3`, `config.e_sqlite3`) | 3.0.5 | Apache-2.0 | .NET bindings and the bundled native build of SQLite with FTS5. |
 | [SQLite](https://www.sqlite.org/copyright.html) (native library from the `SQLite` package) | 3.53.4 | Public domain | The search index and vector store. |
 | [Microsoft.Data.Sqlite](https://github.com/dotnet/efcore) (`Microsoft.Data.Sqlite`, `.Core`) | 10.0.13 | MIT | ADO.NET access to SQLite. |

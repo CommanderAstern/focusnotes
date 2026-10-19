@@ -4,3 +4,4 @@
 TestResults/
 /.ocr-models/
 /.semantic-models/
+/spikes/.models/

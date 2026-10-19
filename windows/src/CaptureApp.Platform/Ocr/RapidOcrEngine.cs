@@ -1,36 +1,30 @@
 using System.Diagnostics;
-using System.Text.Json;
 using RapidOcrNet;
 using SkiaSharp;
 
 namespace CaptureApp.Platform.Ocr;
 
-/// <summary>Offline RapidOcrNet engine with one lazily created warm model session per recognizer.</summary>
+/// <summary>Offline RapidOcrNet engine for the bundled PP-OCRv5 Latin models.</summary>
 public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 {
     private static readonly TimeSpan IdleLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan EvictionPeriod = TimeSpan.FromSeconds(10);
-    private const string DetectorFile = "ppocrv5-det-mobile.onnx";
-    private const string ClassifierFile = "ppocrv5-textline-cls-mobile.onnx";
-    private static readonly string[] RightToLeftLanguages = ["ar-SA", "ars-SA"];
+    // English-first OCR is Nehul's decision to get the Windows POC working ASAP.
+    private const string DetectorFile = "ch_PP-OCRv5_mobile_det.onnx";
+    private const string ClassifierFile = "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx";
+    private const string RecognizerFile = "latin_PP-OCRv5_rec_mobile_infer.onnx";
+    private const string DictionaryFile = "ppocrv5_latin_dict.txt";
+    private static readonly string ModelDirectory = Path.Combine(AppContext.BaseDirectory, "models", "v5");
 
     private readonly object _gate = new();
-    private readonly Dictionary<string, ModelSlot> _loadedModels = new(StringComparer.Ordinal);
-    private readonly IReadOnlyList<OcrRecognizerModel> _models;
-    private readonly OcrLanguageSelection _selection;
-    private readonly string _recognizerDirectory;
+    private ModelSlot? _loadedModel;
     private readonly System.Threading.Timer _evictionTimer;
     private bool _disposed;
 
-    public RapidOcrEngine(IEnumerable<string>? preferredLanguages = null)
+    public RapidOcrEngine()
     {
-        _models = LoadManifest();
-        _selection = OcrLanguageSelector.Select(preferredLanguages ?? OcrLanguageSelector.GetPreferredLanguages(), _models);
-        _recognizerDirectory = Path.Combine(AppContext.BaseDirectory, "OcrModels");
         _evictionTimer = new System.Threading.Timer(EvictIdleModels, null, EvictionPeriod, EvictionPeriod);
     }
-
-    public OcrLanguageSelection LanguageSelection => _selection;
 
     public bool IsAvailable => GetMissingModelFiles().Count == 0;
 
@@ -41,7 +35,7 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
             var missing = GetMissingModelFiles();
             return missing.Count == 0
                 ? string.Empty
-                : $"OCR models missing: {string.Join(", ", missing)}. Fetch them with windows/scripts/fetch-ocr-models.sh or .ps1.";
+                : $"RapidOcrNet's bundled PP-OCRv5 Latin models are missing from {ModelDirectory}: {string.Join(", ", missing)}.";
         }
     }
 
@@ -64,7 +58,7 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         EnsureAvailable();
 
-        var slot = AcquireSlot(_selection.Model);
+        var slot = AcquireSlot();
         var acquired = false;
         try
         {
@@ -98,7 +92,7 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 
     public void Dispose()
     {
-        ModelSlot[] slots;
+        ModelSlot? slot;
         lock (_gate)
         {
             if (_disposed)
@@ -108,33 +102,28 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 
             Volatile.Write(ref _disposed, true);
             _evictionTimer.Dispose();
-            while (_loadedModels.Values.Any(slot => slot.Leases > 0))
+            while (_loadedModel is { Leases: > 0 })
             {
                 Monitor.Wait(_gate);
             }
 
-            slots = _loadedModels.Values.ToArray();
-            _loadedModels.Clear();
+            slot = _loadedModel;
+            _loadedModel = null;
         }
 
-        foreach (var slot in slots)
+        if (slot is not null)
         {
             slot.Ocr.Dispose();
             slot.Gate.Dispose();
         }
     }
 
-    private ModelSlot AcquireSlot(OcrRecognizerModel model)
+    private ModelSlot AcquireSlot()
     {
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (!_loadedModels.TryGetValue(model.Id, out var slot))
-            {
-                slot = CreateSlot(model);
-                _loadedModels.Add(model.Id, slot);
-            }
-
+            var slot = _loadedModel ??= CreateSlot();
             slot.Leases++;
             return slot;
         }
@@ -150,12 +139,12 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         }
     }
 
-    private ModelSlot CreateSlot(OcrRecognizerModel model)
+    private ModelSlot CreateSlot()
     {
-        var detectorPath = Path.Combine(_recognizerDirectory, DetectorFile);
-        var classifierPath = Path.Combine(_recognizerDirectory, ClassifierFile);
-        var recognizerPath = Path.Combine(_recognizerDirectory, $"{model.Id}.onnx");
-        var dictionaryPath = Path.Combine(_recognizerDirectory, $"{model.Id}.dict.txt");
+        var detectorPath = Path.Combine(ModelDirectory, DetectorFile);
+        var classifierPath = Path.Combine(ModelDirectory, ClassifierFile);
+        var recognizerPath = Path.Combine(ModelDirectory, RecognizerFile);
+        var dictionaryPath = Path.Combine(ModelDirectory, DictionaryFile);
         var ocr = new RapidOcr();
         try
         {
@@ -173,29 +162,26 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 
     private void EvictIdleModels(object? state)
     {
-        List<ModelSlot> expired = [];
+        ModelSlot? expired = null;
         lock (_gate)
         {
-            if (_disposed)
+            if (_disposed || _loadedModel is not { } slot)
             {
                 return;
             }
 
             var now = Stopwatch.GetTimestamp();
-            foreach (var (modelId, slot) in _loadedModels.ToArray())
+            if (slot.Leases == 0 && Stopwatch.GetElapsedTime(slot.LastUsedTimestamp, now) >= IdleLifetime)
             {
-                if (slot.Leases == 0 && Stopwatch.GetElapsedTime(slot.LastUsedTimestamp, now) >= IdleLifetime)
-                {
-                    _loadedModels.Remove(modelId);
-                    expired.Add(slot);
-                }
+                _loadedModel = null;
+                expired = slot;
             }
         }
 
-        foreach (var slot in expired)
+        if (expired is not null)
         {
-            slot.Ocr.Dispose();
-            slot.Gate.Dispose();
+            expired.Ocr.Dispose();
+            expired.Gate.Dispose();
         }
     }
 
@@ -212,10 +198,10 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         var missing = new List<string>();
         var files = new[]
         {
-            Path.Combine(_recognizerDirectory, DetectorFile),
-            Path.Combine(_recognizerDirectory, ClassifierFile),
-            Path.Combine(_recognizerDirectory, $"{_selection.Model.Id}.onnx"),
-            Path.Combine(_recognizerDirectory, $"{_selection.Model.Id}.dict.txt")
+            Path.Combine(ModelDirectory, DetectorFile),
+            Path.Combine(ModelDirectory, ClassifierFile),
+            Path.Combine(ModelDirectory, RecognizerFile),
+            Path.Combine(ModelDirectory, DictionaryFile)
         };
         foreach (var path in files)
         {
@@ -247,11 +233,8 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         maxPixelX -= inset;
         minPixelY += inset;
         maxPixelY -= inset;
-        var lineText = RightToLeftLanguages.Contains(_selection.MatchedLanguage, StringComparer.Ordinal)
-            ? OcrTextLayout.ReverseTextElements(text)
-            : text;
         var confidence = charScores is { Count: > 0 } ? charScores.Average() : 0;
-        return new OcrLine(lineText,
+        return new OcrLine(text,
             minPixelX / imageWidth,
             1.0 - maxPixelY / imageHeight,
             maxPixelX / imageWidth,
@@ -272,20 +255,6 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         }
 
         return Math.Min(distance, Math.Max(0, Math.Min(width, height) / 2 - 0.5));
-    }
-
-    private static IReadOnlyList<OcrRecognizerModel> LoadManifest()
-    {
-        var resourceName = typeof(RapidOcrEngine).Assembly.GetManifestResourceNames()
-            .SingleOrDefault(name => name.EndsWith("Ocr.ocr-models.json", StringComparison.Ordinal))
-            ?? throw new InvalidOperationException("The embedded OCR model manifest is missing.");
-        using var stream = typeof(RapidOcrEngine).Assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException("The embedded OCR model manifest could not be opened.");
-        var entries = JsonSerializer.Deserialize<List<OcrRecognizerModel>>(stream,
-                          new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                      ?? throw new InvalidDataException("The embedded OCR model manifest is empty.");
-        // Detector and classifier entries share the manifest but are not language-selectable.
-        return entries.Where(entry => entry.Kind == "recognizer").ToArray();
     }
 
     private sealed class ModelSlot(RapidOcr ocr, long lastUsedTimestamp)
