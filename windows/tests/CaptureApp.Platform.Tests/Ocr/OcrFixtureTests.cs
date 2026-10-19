@@ -6,6 +6,11 @@ using Xunit;
 
 namespace CaptureApp.Platform.Tests.Ocr;
 
+// Runs alone so the latency gate is not measured against other test classes competing for CPU.
+[CollectionDefinition("OcrFixtures", DisableParallelization = true)]
+public sealed class OcrFixtureCollection;
+
+[Collection("OcrFixtures")]
 public sealed class OcrFixtureTests
 {
     [Fact]

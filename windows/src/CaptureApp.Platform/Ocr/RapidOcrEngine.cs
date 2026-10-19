@@ -159,9 +159,9 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         var ocr = new RapidOcr();
         try
         {
-            var threads = Math.Min(4, Math.Max(1, Environment.ProcessorCount));
-            using var sessionOptions = RapidOcr.GetDefaultSessionOptions(threads);
-            ocr.InitModels(detectorPath, classifierPath, recognizerPath, dictionaryPath, sessionOptions);
+            // Default thread count (ONNX Runtime picks per physical core), matching the measured spike; forcing
+            // logical-core threads oversubscribed small CI runners.
+            ocr.InitModels(detectorPath, classifierPath, recognizerPath, dictionaryPath);
             return new ModelSlot(ocr, Stopwatch.GetTimestamp());
         }
         catch
@@ -236,20 +236,42 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
             return new OcrLine(text, 0, 0, 0, 0, 0);
         }
 
-        var minPixelX = points.Min(point => point.X);
-        var maxPixelX = points.Max(point => point.X);
-        var minPixelY = points.Min(point => point.Y);
-        var maxPixelY = points.Max(point => point.Y);
+        double minPixelX = points.Min(point => point.X);
+        double maxPixelX = points.Max(point => point.X);
+        double minPixelY = points.Min(point => point.Y);
+        double maxPixelY = points.Max(point => point.Y);
+        // The detector dilates boxes by UnClipRatio; Vision returns glyph-tight boxes, so undo the dilation
+        // to keep the geometry-only classifier coverage comparable.
+        var inset = UnclipInset(maxPixelX - minPixelX, maxPixelY - minPixelY);
+        minPixelX += inset;
+        maxPixelX -= inset;
+        minPixelY += inset;
+        maxPixelY -= inset;
         var lineText = RightToLeftLanguages.Contains(_selection.MatchedLanguage, StringComparer.Ordinal)
             ? OcrTextLayout.ReverseTextElements(text)
             : text;
         var confidence = charScores is { Count: > 0 } ? charScores.Average() : 0;
         return new OcrLine(lineText,
-            (double)minPixelX / imageWidth,
-            1.0 - (double)maxPixelY / imageHeight,
-            (double)maxPixelX / imageWidth,
-            1.0 - (double)minPixelY / imageHeight,
+            minPixelX / imageWidth,
+            1.0 - maxPixelY / imageHeight,
+            maxPixelX / imageWidth,
+            1.0 - minPixelY / imageHeight,
             confidence);
+    }
+
+    /// <summary>Per-side inset that inverts the detector's DB unclip (distance = area * ratio / perimeter).</summary>
+    private static double UnclipInset(double width, double height)
+    {
+        var ratio = RapidOcrOptions.Default.UnClipRatio;
+        var distance = 0.0;
+        for (var i = 0; i < 24; i++)
+        {
+            var w = Math.Max(1.0, width - 2 * distance);
+            var h = Math.Max(1.0, height - 2 * distance);
+            distance = w * h * ratio / (2 * (w + h));
+        }
+
+        return Math.Min(distance, Math.Max(0, Math.Min(width, height) / 2 - 0.5));
     }
 
     private static IReadOnlyList<OcrRecognizerModel> LoadManifest()
