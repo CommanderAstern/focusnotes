@@ -94,8 +94,15 @@ public sealed class CoreHardeningTests
         using var process = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{outside}\"") { CreateNoWindow = true })!;
         process.WaitForExit();
         Assert.Equal(0, process.ExitCode);
-        Assert.Throws<VaultFileException>(() => NoteFile.SafePath(e.Vault.Root, "escape/note.md"));
-        Assert.True(FileMetadata.At(junction)!.IsLink);
+        try
+        {
+            Assert.Throws<VaultFileException>(() => NoteFile.SafePath(e.Vault.Root, "escape/note.md"));
+            Assert.True(FileMetadata.At(junction)!.IsLink);
+        }
+        finally
+        {
+            Directory.Delete(junction); // Remove the junction itself so cleanup never recurses through it.
+        }
     }
 
     [WindowsFact]

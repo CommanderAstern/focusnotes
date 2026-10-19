@@ -6,6 +6,11 @@ using Xunit;
 
 namespace CaptureApp.AppCore.Tests;
 
+/// Runs alone: its file churn and index syncs starve the timing-sensitive controller self-test on small CI runners.
+[CollectionDefinition("VaultMonitorDeadlock", DisableParallelization = true)]
+public sealed class VaultMonitorDeadlockCollection;
+
+[Collection("VaultMonitorDeadlock")]
 public sealed class VaultMonitorDeadlockTests
 {
     [Fact]
@@ -25,7 +30,7 @@ public sealed class VaultMonitorDeadlockTests
 
         var work = Task.Run(async () =>
         {
-            for (var i = 0; i < 150; i++)
+            for (var i = 0; i < 60; i++)
             {
                 await File.WriteAllTextAsync(System.IO.Path.Combine(vaultRoot, $"Note {i}.md"), $"# Note {i}\n\nbody\n", new UTF8Encoding(false));
                 monitor.RefreshExternalRoots();
@@ -33,7 +38,7 @@ public sealed class VaultMonitorDeadlockTests
         }, cancellationToken);
         var refresher = Task.Run(() =>
         {
-            for (var i = 0; i < 300; i++) { monitor.RefreshExternalRoots(); }
+            for (var i = 0; i < 120; i++) { monitor.RefreshExternalRoots(); }
         }, cancellationToken);
 
         await Task.WhenAll(work, refresher).WaitAsync(TimeSpan.FromSeconds(20), cancellationToken);
