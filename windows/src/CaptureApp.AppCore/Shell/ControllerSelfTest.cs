@@ -73,9 +73,12 @@ public static class ControllerSelfTest
             await coordinator.WaitForProcessingAsync().ConfigureAwait(false);
             var tail = coordinator.CommitPending() ?? throw new InvalidOperationException("Second acquisition was not staged.");
             await tail.ConfigureAwait(false);
-            if (DateTimeOffset.UtcNow - start > TimeSpan.FromSeconds(2) || pipeline.Index.Capture(imageId)?.BlockKind != BlockKind.Image)
+            var elapsed = DateTimeOffset.UtcNow - start;
+            var imageKind = pipeline.Index.Capture(imageId)?.BlockKind;
+            if (elapsed > TimeSpan.FromSeconds(2) || imageKind != BlockKind.Image)
             {
-                throw new InvalidOperationException("OCR over budget did not stage and commit an image within two seconds.");
+                throw new InvalidOperationException(
+                    $"OCR over budget did not stage and commit an image within two seconds (took {elapsed.TotalMilliseconds:F0} ms, indexed as {imageKind?.ToString() ?? "nothing"}).");
             }
 
             var inbox = File.ReadAllText(pipeline.Vault.InboxUrl);

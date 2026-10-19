@@ -302,11 +302,10 @@ public sealed class VaultWatcher : IDisposable
                 {
                     result.TryAdd(pair.Key, pair.Value);
                 }
+                // Reported once per directory: clearing it on the next good scan made transient Windows
+                // failures (entries pending delete mid-write) republish a full sync on every batch.
                 ReportIssue("scan:" + directory);
-                return;
             }
-
-            issues.Remove("scan:" + directory);
         }
 
         try
