@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using CaptureApp.AppCore;
 using CaptureApp.Core;
+using CaptureApp.Updates;
 
 namespace CaptureApp.App;
 
@@ -9,6 +10,16 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        UpdateBootstrap.Run();
+
+#if CI_UPDATE_TESTS
+        if (args.Length > 0 && string.Equals(args[0], "--ci-update", StringComparison.Ordinal))
+        {
+            AttachConsoleIfNeeded();
+            return CiUpdateCommand.RunAsync(args).GetAwaiter().GetResult();
+        }
+#endif
+
         if (args.Length > 0 && string.Equals(args[0], "--self-test", StringComparison.Ordinal))
         {
             AttachConsoleIfNeeded();

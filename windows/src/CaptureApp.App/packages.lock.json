@@ -67,7 +67,8 @@
       "captureapp.appcore": {
         "type": "Project",
         "dependencies": {
-          "CaptureApp.Core": "[0.1.1, )"
+          "CaptureApp.Core": "[0.1.1, )",
+          "CaptureApp.Embed": "[0.1.1, )"
         }
       },
       "captureapp.core": {
@@ -80,7 +81,11 @@
       "captureapp.embed": {
         "type": "Project",
         "dependencies": {
-          "CaptureApp.Core": "[0.1.1, )"
+          "CaptureApp.Core": "[0.1.1, )",
+          "Microsoft.Data.Sqlite": "[10.0.13, )",
+          "Microsoft.ML.OnnxRuntime": "[1.31.0, )",
+          "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.5, )",
+          "SkiaSharp": "[3.119.1, )"
         }
       },
       "captureapp.modelinstall": {
@@ -103,11 +108,25 @@
           "RapidOcrNet": "[4.2.0, )"
         }
       },
+      "captureapp.updates": {
+        "type": "Project",
+        "dependencies": {
+          "BouncyCastle.Cryptography": "[2.6.2, )",
+          "CaptureApp.Core": "[0.1.1, )",
+          "Velopack": "[1.2.161, )"
+        }
+      },
       "AvalonEdit": {
         "type": "CentralTransitive",
         "requested": "[6.3.1.120, )",
         "resolved": "6.3.1.120",
         "contentHash": "6ASBKPzAg64BLDlFOJo4Ypr1sA/6hB5+TfHLJaZYUSTE0jgxvKlVqKeo/ISTG9qEMxu604qUu6BGugmJkfdrNw=="
+      },
+      "BouncyCastle.Cryptography": {
+        "type": "CentralTransitive",
+        "requested": "[2.6.2, )",
+        "resolved": "2.6.2",
+        "contentHash": "7oWOcvnntmMKNzDLsdxAYqApt+AjpRpP2CShjMfIa3umZ42UQMvH0tl1qAliYPNYO6vTdcGMqnRrCPmsfzTI1w=="
       },
       "Microsoft.Data.Sqlite": {
         "type": "CentralTransitive",
@@ -160,6 +179,12 @@
           "SQLite": "3.53.4",
           "SQLitePCLRaw.config.e_sqlite3": "3.0.5"
         }
+      },
+      "Velopack": {
+        "type": "CentralTransitive",
+        "requested": "[1.2.161, )",
+        "resolved": "1.2.161",
+        "contentHash": "OpHNacIumnkhaaX3ZlQ/TCR4YPOJvud2/PAOoWb6o+mIrLwIVA275I5wAgt4q/1O2VrJeDwR1qFQyqzG4lUArg=="
       }
     }
   }

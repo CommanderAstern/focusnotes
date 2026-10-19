@@ -12,6 +12,7 @@
     <AppVersion>$([System.Text.RegularExpressions.Regex]::Match('$(_AppEnvironment)', '(?m)^VERSION=([^\r\n]+)').Groups[1].Value)</AppVersion>
     <AppBuild>$([System.Text.RegularExpressions.Regex]::Match('$(_AppEnvironment)', '(?m)^BUILD=([^\r\n]+)').Groups[1].Value)</AppBuild>
     <GitHubRepo>$([System.Text.RegularExpressions.Regex]::Match('$(_AppEnvironment)', '(?m)^GITHUB_REPO=([^\r\n]+)').Groups[1].Value)</GitHubRepo>
+    <WindowsUpdateKeys>$([System.Text.RegularExpressions.Regex]::Match('$(_AppEnvironment)', '(?m)^WINDOWS_UPDATE_ED_KEYS=([^\r\n]*)').Groups[1].Value)</WindowsUpdateKeys>
     <Version>$(AppVersion)</Version>
     <FileVersion>$(AppVersion).$(AppBuild)</FileVersion>
   </PropertyGroup>

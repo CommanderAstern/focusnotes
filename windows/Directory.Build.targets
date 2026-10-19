@@ -14,6 +14,7 @@
       <_AppInfoLine Include="public const string Version = &quot;$(AppVersion)&quot;%3B" />
       <_AppInfoLine Include="public const string Build = &quot;$(AppBuild)&quot;%3B" />
       <_AppInfoLine Include="public const string GitHubRepo = &quot;$(GitHubRepo)&quot;%3B" />
+      <_AppInfoLine Include="public const string WindowsUpdateKeys = &quot;$(WindowsUpdateKeys)&quot;%3B" />
       <_AppInfoLine Include="}" />
     </ItemGroup>
     <WriteLinesToFile File="$(IntermediateOutputPath)AppInfo.g.cs" Lines="@(_AppInfoLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />

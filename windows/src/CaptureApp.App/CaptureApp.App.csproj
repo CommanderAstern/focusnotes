@@ -7,6 +7,9 @@
     <RootNamespace>CaptureApp.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(CIUpdateTests)' == 'true'">
+    <DefineConstants>$(DefineConstants);CI_UPDATE_TESTS</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../CaptureApp.AppCore/CaptureApp.AppCore.csproj" />
     <ProjectReference Include="../CaptureApp.Core/CaptureApp.Core.csproj" />
@@ -14,5 +17,6 @@
     <ProjectReference Include="../CaptureApp.Overlay/CaptureApp.Overlay.csproj" />
     <ProjectReference Include="../CaptureApp.Embed/CaptureApp.Embed.csproj" />
     <ProjectReference Include="../CaptureApp.ModelInstall/CaptureApp.ModelInstall.csproj" />
+    <ProjectReference Include="../CaptureApp.Updates/CaptureApp.Updates.csproj" />
   </ItemGroup>
 </Project>
