@@ -50,6 +50,7 @@ internal interface ISelectionServices
     bool InjectCopy();
     Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot);
     ClipboardRestore Restore(ClipboardSnapshot snapshot, uint sequence);
+    void ScheduleRestoreRetry(uint targetPid, ClipboardSnapshot snapshot);
     Task CheckpointAsync(SelectionCheckpoint checkpoint);
 }
 
@@ -78,6 +79,7 @@ internal class WindowsSelectionServices : ISelectionServices
     { Type = 1, Data = new() { Keyboard = new() { Key = key, Flags = flags } } };
     public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => clipboard.Value.ReadCopyAsync(targetPid, remaining, snapshot);
     public virtual ClipboardRestore Restore(ClipboardSnapshot snapshot, uint sequence) => clipboard.Value.Restore(snapshot, sequence, WhileRestoreLocked);
+    public virtual void ScheduleRestoreRetry(uint targetPid, ClipboardSnapshot snapshot) => clipboard.Value.ScheduleRestoreRetry(targetPid, snapshot);
     public virtual Task CheckpointAsync(SelectionCheckpoint checkpoint) => Task.CompletedTask;
 }
 
@@ -146,6 +148,7 @@ public sealed class SelectionReader
             {
                 var injected = services.InjectCopy();
                 var wait = Stopwatch.StartNew();
+                var notOpened = false;
                 // Even partial/failed injection may have changed the clipboard: observe it, then restore in finally.
                 while (wait.Elapsed < TimeSpan.FromMilliseconds(500)) // G8
                 {
@@ -154,7 +157,13 @@ public sealed class SelectionReader
                         var copy = await services.ReadCopyAsync(context.ProcessIdentifier,
                             TimeSpan.FromMilliseconds(500) - wait.Elapsed, snapshot).ConfigureAwait(false);
                         if (copy is null) break; // Out of time or abandoned: the late check below still restores.
-                        if (copy.NotOpened) { await Task.Delay(10).ConfigureAwait(false); continue; } // Target may hold the clipboard open (Office): keep polling.
+                        if (copy.NotOpened)
+                        {
+                            notOpened = true;
+                            if (cancellationToken.IsCancellationRequested) break;
+                            await Task.Delay(10).ConfigureAwait(false);
+                            continue;
+                        } // Target may hold the clipboard open (Office): keep polling.
                         if (!copy.TargetOwned) return SelectionResult.Refuse(SelectionFailure.NoSelection);
                         if (copy.Sequence != snapshot.Sequence)
                         {
@@ -174,6 +183,8 @@ public sealed class SelectionReader
                 {
                     var late = await services.ReadCopyAsync(context.ProcessIdentifier, TimeSpan.FromMilliseconds(100), snapshot).ConfigureAwait(false);
                     if (late is { TargetOwned: true } && late.Sequence != snapshot.Sequence) restoreSequence = late.Sequence;
+                    // The target never released the clipboard: a copy may still land. Retry in the background, sequence-conditionally.
+                    else if (late is { NotOpened: true } || (late is null && notOpened)) services.ScheduleRestoreRetry(context.ProcessIdentifier, snapshot);
                 }
                 return SelectionResult.Refuse(cancellationToken.IsCancellationRequested ? SelectionFailure.Cancelled : SelectionFailure.NoSelection);
             }

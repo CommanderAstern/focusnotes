@@ -56,6 +56,32 @@ internal sealed class ClipboardGuard
         catch { snapshot.Dispose(); throw; }
     }
 
+    /// <summary>Bounded background retry for a target that kept the clipboard open past the capture deadline.
+    /// Restores only a target-owned copy that differs from the snapshot, and only if the sequence is still that copy's.</summary>
+    internal void ScheduleRestoreRetry(uint targetPid, ClipboardSnapshot snapshot)
+    {
+        _ = snapshot.Retain(); // Lease outlives the caller's disposal.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                while (clock.Elapsed < TimeSpan.FromSeconds(2))
+                {
+                    var copy = await ReadCopyAsync(targetPid, TimeSpan.FromMilliseconds(300), snapshot).ConfigureAwait(false);
+                    if (copy is { NotOpened: false })
+                    {
+                        if (copy.TargetOwned && copy.Sequence != snapshot.Sequence) _ = Restore(snapshot, copy.Sequence);
+                        return; // Foreign or unchanged: never overwrite.
+                    }
+                    await Task.Delay(50).ConfigureAwait(false);
+                }
+            }
+            catch (Exception) { /* Best effort cleanup. */ }
+            finally { snapshot.Dispose(); }
+        });
+    }
+
     private ClipboardCopy ReadCopy(uint targetPid)
     {
         if (!TryOpen(listener.Window)) return new(null, 0, false, NotOpened: true); // Not a foreign owner: the target may still hold it.

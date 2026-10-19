@@ -144,6 +144,38 @@ public sealed class SelectionLogicTests
     }
 
     [Fact]
+    public async Task FailedRestoreIsRetriedUpToThreeAttempts()
+    {
+        var fake = new FakeServices { FailRestores = 2 };
+        var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
+        Assert.Equal("copied", result.Capture?.Text);
+        Assert.Equal(3, fake.Restores);
+        Assert.True(fake.Restored);
+    }
+
+    [Fact]
+    public async Task NotOpenedPastDeadlineSchedulesBackgroundRetry()
+    {
+        var fake = new FakeServices { CopyFactory = () => new(null, 0, false, NotOpened: true) };
+        var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
+        Assert.Equal(SelectionFailure.NoSelection, result.Failure);
+        Assert.Equal(1, fake.RetriesScheduled);
+        Assert.Equal(0, fake.Restores);
+    }
+
+    [Fact]
+    public async Task NotOpenedWithCancellationBreaksToCleanup()
+    {
+        using var cancel = new CancellationTokenSource();
+        var fake = new FakeServices { CopyFactory = () => { cancel.Cancel(); return new(null, 0, false, NotOpened: true); } };
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var result = await new SelectionReader(fake).ReadAsync(true, Target, cancel.Token);
+        Assert.Equal(SelectionFailure.Cancelled, result.Failure);
+        Assert.True(clock.ElapsedMilliseconds < 400);
+        Assert.Equal(1, fake.RetriesScheduled);
+    }
+
+    [Fact]
     public async Task ForeignOwnerCopyIsNeverRestored()
     {
         var fake = new FakeServices { TargetOwnsCopy = false };
@@ -289,6 +321,7 @@ public sealed class SelectionLogicTests
         internal SnapshotFailure SnapshotFailure;
         internal Queue<ClipboardCopy> CopyScript = new();
         internal Func<ClipboardCopy?>? CopyFactory;
+        internal int FailRestores, RetriesScheduled;
         internal Action? OnSafetyRead;
         internal Func<SelectionCheckpoint, Task>? Hook;
         public bool ModifiersHeld { get; set; }
@@ -309,7 +342,8 @@ public sealed class SelectionLogicTests
         public bool InjectCopy() { Injections++; ClipboardSequence++; return true; }
         public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => Task.FromResult<ClipboardCopy?>(CopyFactory is not null ? CopyFactory() : CopyScript.Count > 0 ? CopyScript.Dequeue() : new("copied", ClipboardSequence, TargetOwnsCopy));
         public ClipboardRestore Restore(ClipboardSnapshot snapshot, uint sequence)
-        { Restores++; Restored = sequence == ClipboardSequence; return new(Restored, TimeSpan.Zero); }
+        { Restores++; Restored = Restores > FailRestores && sequence == ClipboardSequence; return new(Restored, TimeSpan.Zero); }
+        public void ScheduleRestoreRetry(uint targetPid, ClipboardSnapshot snapshot) => RetriesScheduled++;
         public Task CheckpointAsync(SelectionCheckpoint checkpoint) => Hook?.Invoke(checkpoint) ?? Task.CompletedTask;
     }
 }
