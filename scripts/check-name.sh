@@ -18,9 +18,13 @@ app_name = sys.argv[2].casefold()
 matches = []
 files = [root / "Package.swift"]
 
-for directory_name in ("Sources", "Tests", "scripts"):
+for directory_name in ("Sources", "Tests", "scripts", "windows", "conformance"):
     directory = root / directory_name
     for path in directory.rglob("*"):
+        if directory_name == "windows" and any(part in ("bin", "obj") for part in path.relative_to(directory).parts):
+            continue
+        if directory_name in ("windows", "conformance") and app_name in str(path.relative_to(root)).casefold():
+            matches.append(f"{path.relative_to(root)}: app name in path")
         if not path.is_file():
             continue
         if directory_name == "Sources" and path.relative_to(directory).parts[0] == "CSQLite":

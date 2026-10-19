@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -91,3 +92,45 @@ jobs:
           MNT: ${{ runner.temp }}/mnt
         run: |
           hdiutil detach "$MNT" -force || true
+
+  windows:
+    defaults:
+      run:
+        working-directory: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: windows/global.json
+
+      - name: Restore locked dependencies
+        run: dotnet restore CaptureApp.sln --locked-mode
+
+      - name: Build
+        run: dotnet build CaptureApp.sln -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test CaptureApp.sln -c Release --no-build
+
+      - name: Probe runner desktop capabilities
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          dotnet run --project tools/RunnerProbe/CaptureApp.RunnerProbe.csproj -c Release --no-build |
+            Tee-Object -FilePath ../runner-probe.md
+          Get-Content ../runner-probe.md | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload runner capability table
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-probe-${{ matrix.runner }}
+          path: runner-probe.md
+          if-no-files-found: warn

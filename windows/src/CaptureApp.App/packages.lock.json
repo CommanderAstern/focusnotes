@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0-windows10.0.19041": {
+      "captureapp.core": {
+        "type": "Project"
+      },
+      "captureapp.embed": {
+        "type": "Project",
+        "dependencies": {
+          "CaptureApp.Core": "[0.1.1, )"
+        }
+      },
+      "captureapp.modelinstall": {
+        "type": "Project",
+        "dependencies": {
+          "CaptureApp.Embed": "[0.1.1, )"
+        }
+      },
+      "captureapp.overlay": {
+        "type": "Project",
+        "dependencies": {
+          "CaptureApp.Core": "[0.1.1, )",
+          "CaptureApp.Platform": "[0.1.1, )"
+        }
+      },
+      "captureapp.platform": {
+        "type": "Project",
+        "dependencies": {
+          "CaptureApp.Core": "[0.1.1, )"
+        }
+      }
+    }
+  }
+}

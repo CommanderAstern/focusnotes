@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>$(AppName)</AssemblyName>
+    <RootNamespace>CaptureApp.App</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CaptureApp.Core/CaptureApp.Core.csproj" />
+    <ProjectReference Include="../CaptureApp.Platform/CaptureApp.Platform.csproj" />
+    <ProjectReference Include="../CaptureApp.Overlay/CaptureApp.Overlay.csproj" />
+    <ProjectReference Include="../CaptureApp.Embed/CaptureApp.Embed.csproj" />
+    <ProjectReference Include="../CaptureApp.ModelInstall/CaptureApp.ModelInstall.csproj" />
+  </ItemGroup>
+</Project>
