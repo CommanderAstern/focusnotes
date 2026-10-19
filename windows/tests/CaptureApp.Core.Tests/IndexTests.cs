@@ -329,6 +329,7 @@ public sealed class IndexTests
     }
 
     [Fact]
+    [Trait("Category", "Perf")]
     public void PerformanceMatchesTheSwiftIndexThresholds()
     {
         using var e = new CheckVault();

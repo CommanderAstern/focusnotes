@@ -65,6 +65,7 @@ public sealed class OcrFixtureTests
 
     [Fact]
     [Trait("Needs", "OcrModels")]
+    [Trait("Category", "Perf")]
     public void LargeCorpusImageRecognitionHasP95BelowTheClassificationBudget()
     {
         using var engine = CreateEngineAndRequireModels();

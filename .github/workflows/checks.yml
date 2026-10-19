@@ -140,7 +140,14 @@ jobs:
           CAPTUREAPP_REQUIRE_OCR_MODELS: "1"
           CAPTUREAPP_MODELS_DIR: ${{ github.workspace }}/windows/.semantic-models
           CAPTUREAPP_REQUIRE_MODELS: "1"
-        run: dotnet test CaptureApp.sln -c Release --no-build
+        run: dotnet test CaptureApp.sln -c Release --no-build --filter "Category!=Perf"
+
+      - name: Perf gates
+        env:
+          CAPTUREAPP_REQUIRE_OCR_MODELS: "1"
+          CAPTUREAPP_MODELS_DIR: ${{ github.workspace }}/windows/.semantic-models
+          CAPTUREAPP_REQUIRE_MODELS: "1"
+        run: dotnet test CaptureApp.sln -c Release --no-build --filter "Category=Perf" -m:1
 
       - name: Gallery
         shell: pwsh
