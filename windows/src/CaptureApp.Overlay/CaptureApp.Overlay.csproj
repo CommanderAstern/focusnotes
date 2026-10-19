@@ -4,4 +4,7 @@
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="AvalonEdit" />
+  </ItemGroup>
 </Project>

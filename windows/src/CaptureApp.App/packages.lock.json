@@ -23,14 +23,6 @@
           "System.Numerics.Tensors": "9.0.0"
         }
       },
-      "SkiaSharp": {
-        "type": "Transitive",
-        "resolved": "3.119.1",
-        "contentHash": "+Ru1BTSZQne3Vp+vbSb50Ke3Nlc3ZnItxx4+751J9WZ8YzLKAV/n+9DAo4zFTyeCI//ueT63c+VybmTTpYBEiw==",
-        "dependencies": {
-          "SkiaSharp.NativeAssets.Win32": "3.119.1"
-        }
-      },
       "SkiaSharp.NativeAssets.Linux.NoDependencies": {
         "type": "Transitive",
         "resolved": "3.119.1",
@@ -98,7 +90,10 @@
         }
       },
       "captureapp.overlay": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "AvalonEdit": "[6.3.1.120, )"
+        }
       },
       "captureapp.platform": {
         "type": "Project",
@@ -107,6 +102,12 @@
           "Microsoft.ML.OnnxRuntime": "[1.31.0, )",
           "RapidOcrNet": "[4.2.0, )"
         }
+      },
+      "AvalonEdit": {
+        "type": "CentralTransitive",
+        "requested": "[6.3.1.120, )",
+        "resolved": "6.3.1.120",
+        "contentHash": "6ASBKPzAg64BLDlFOJo4Ypr1sA/6hB5+TfHLJaZYUSTE0jgxvKlVqKeo/ISTG9qEMxu604qUu6BGugmJkfdrNw=="
       },
       "Microsoft.Data.Sqlite": {
         "type": "CentralTransitive",
@@ -139,6 +140,15 @@
           "Microsoft.ML.OnnxRuntime.Managed": "1.29.0",
           "SkiaSharp": "3.119.1",
           "SkiaSharp.NativeAssets.Linux.NoDependencies": "3.119.1"
+        }
+      },
+      "SkiaSharp": {
+        "type": "CentralTransitive",
+        "requested": "[3.119.1, )",
+        "resolved": "3.119.1",
+        "contentHash": "+Ru1BTSZQne3Vp+vbSb50Ke3Nlc3ZnItxx4+751J9WZ8YzLKAV/n+9DAo4zFTyeCI//ueT63c+VybmTTpYBEiw==",
+        "dependencies": {
+          "SkiaSharp.NativeAssets.Win32": "3.119.1"
         }
       },
       "SQLitePCLRaw.bundle_e_sqlite3": {
