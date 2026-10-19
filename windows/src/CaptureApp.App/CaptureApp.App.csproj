@@ -18,5 +18,10 @@
     <ProjectReference Include="../CaptureApp.Embed/CaptureApp.Embed.csproj" />
     <ProjectReference Include="../CaptureApp.ModelInstall/CaptureApp.ModelInstall.csproj" />
     <ProjectReference Include="../CaptureApp.Updates/CaptureApp.Updates.csproj" />
+    <!-- The embedding helper ships next to the app; the controller launches it by path. -->
+    <ProjectReference Include="../CaptureApp.EmbedHelper/CaptureApp.EmbedHelper.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CaptureApp.App.Tests" />
   </ItemGroup>
 </Project>

@@ -95,6 +95,6 @@ public sealed class RuntimeReliabilityTests
         Assert.Contains("PASS  keyword index query passed", report, StringComparison.Ordinal);
         Assert.Contains("PASS  watcher change reindexed", report, StringComparison.Ordinal);
         Assert.Contains("PASS  shutdown drain passed", report, StringComparison.Ordinal);
-        Assert.Contains("DEFERRED  controller/UI self-test section", report, StringComparison.Ordinal);
+        Assert.Contains("PASS  controller shutdown drain", report, StringComparison.Ordinal);
     }
 }

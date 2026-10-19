@@ -149,6 +149,22 @@ jobs:
           CAPTUREAPP_REQUIRE_MODELS: "1"
         run: dotnet test CaptureApp.sln -c Release --no-build --filter "Category=Perf" -m:1
 
+      - name: Publish and self-test
+        shell: pwsh
+        timeout-minutes: 3
+        env:
+          CAPTUREAPP_REQUIRE_OCR_MODELS: "1"
+          CAPTUREAPP_MODELS_DIR: ${{ github.workspace }}/windows/.semantic-models
+          CAPTUREAPP_REQUIRE_MODELS: "1"
+        run: |
+          $rid = "win-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}"
+          dotnet publish src/CaptureApp.App -c Release -r $rid --self-contained -o "$env:RUNNER_TEMP/publish"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Get-ChildItem "$env:RUNNER_TEMP/publish" -Filter *.exe | Where-Object { $_.Name -notmatch 'EmbedHelper' } | Select-Object -First 1
+          & $exe.FullName --self-test "$env:RUNNER_TEMP/selftest" --models "$env:CAPTUREAPP_MODELS_DIR" | Tee-Object -FilePath "$env:RUNNER_TEMP/selftest.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path "$env:RUNNER_TEMP/selftest.log" -Pattern "architecture .* \(runtime $rid\)" -Quiet)) { throw "Self-test did not report architecture $rid" }
+
       - name: Gallery
         shell: pwsh
         run: |

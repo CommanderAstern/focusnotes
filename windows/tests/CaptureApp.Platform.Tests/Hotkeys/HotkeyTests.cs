@@ -77,7 +77,7 @@ public sealed class HotkeyBindingStoreTests
     }
 
     [Fact]
-    public void CorruptSettingsAreReportedAndLeftUntouched()
+    public void CorruptSettingsAreQuarantinedAndShortcutsFallBackToDefaults()
     {
         using var directory = new TemporaryDirectory();
         var settingsPath = Path.Combine(directory.Path, "settings.json");
@@ -85,9 +85,12 @@ public sealed class HotkeyBindingStoreTests
         File.WriteAllText(settingsPath, corrupt);
         var store = new HotkeyBindingStore(settingsPath);
 
-        Assert.Throws<InvalidDataException>(() => store.Load());
-        Assert.Throws<InvalidDataException>(() => store.Save(HotkeyDefaults.All));
-        Assert.Equal(corrupt, File.ReadAllText(settingsPath));
+        Assert.Equal(HotkeyDefaults.All.Count, store.Load().Count);
+        Assert.False(File.Exists(settingsPath));
+        var quarantined = Assert.Single(Directory.GetFiles(Path.Combine(directory.Path, "corrupt")));
+        Assert.Equal(corrupt, File.ReadAllText(quarantined));
+        store.Save(HotkeyDefaults.All);
+        Assert.Contains("\"shortcuts\"", File.ReadAllText(settingsPath));
     }
 }
 

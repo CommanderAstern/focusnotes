@@ -1,13 +1,14 @@
-using Velopack;
-
 namespace CaptureApp.Updates;
 
-/// <summary>Velopack startup hook; must be the first thing <c>Main</c> does.</summary>
+/// <summary>
+/// Holds the first-run flag. The Velopack hook itself (<c>VelopackApp.Build().OnFirstRun(...).Run()</c>) must be
+/// written literally in the exe's <c>Main</c>, because <c>vpk pack</c> scans the main executable for the call.
+/// </summary>
 public static class UpdateBootstrap
 {
     /// <summary>True when this launch is the first run after a fresh install (the Setup flow reads it).</summary>
     public static bool IsFirstRun { get; private set; }
 
-    public static void Run() =>
-        VelopackApp.Build().OnFirstRun(_ => IsFirstRun = true).Run();
+    /// <summary>Call from the <c>OnFirstRun</c> callback.</summary>
+    public static void MarkFirstRun() => IsFirstRun = true;
 }

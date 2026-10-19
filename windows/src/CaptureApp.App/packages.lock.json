@@ -88,6 +88,12 @@
           "SkiaSharp": "[3.119.1, )"
         }
       },
+      "captureapp.embedhelper": {
+        "type": "Project",
+        "dependencies": {
+          "CaptureApp.Embed": "[0.1.1, )"
+        }
+      },
       "captureapp.modelinstall": {
         "type": "Project",
         "dependencies": {

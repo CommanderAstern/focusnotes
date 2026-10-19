@@ -105,7 +105,8 @@ public sealed class CapturePipeline : IDisposable
         Journal.Store(job);
     }
 
-    public SavedCapture Commit(CaptureJob job, bool? pinOnSave = null)
+    /// <param name="onNoteSaved">Called for typed notes with whether the pin intent failed (the Mac's showNoteSaveFeedback).</param>
+    public SavedCapture Commit(CaptureJob job, bool? pinOnSave = null, Action<SavedCapture, bool>? onNoteSaved = null)
     {
         ThrowIfDisposed();
         Journal.Store(job);
@@ -114,6 +115,11 @@ public sealed class CapturePipeline : IDisposable
         try
         {
             Index.Reindex(saved.Destination.Url);
+            // Journaled OCR text reaches the cache here, including on replay.
+            if (job.Ocr is { } ocr && job.Png is { } png && Index.Capture(saved.CaptureId)?.AssetPath is { } asset)
+            {
+                Index.SetImageText(asset, ocr, SearchIndex.ImageFingerprint(png));
+            }
         }
         catch (Exception error)
         {
@@ -121,7 +127,9 @@ public sealed class CapturePipeline : IDisposable
             logger.Error($"Capture saved but its index update failed: {error}");
         }
 
-        if (job.Prepared.Capture.Content.Kind == CaptureContentKind.Note)
+        var pinFailed = false;
+        var isNote = job.Prepared.Capture.Content.Kind == CaptureContentKind.Note;
+        if (isNote)
         {
             Drafts.CompleteSave(job.NoteDraft ?? job.Prepared.Capture.Content.Value, pinOnSave, intent =>
             {
@@ -132,16 +140,19 @@ public sealed class CapturePipeline : IDisposable
                 }
                 catch (Exception error)
                 {
+                    pinFailed = true;
                     logger.Error($"Note was saved but could not be pinned: {error}");
                 }
             });
         }
 
         Journal.Remove(saved.CaptureId);
+        if (isNote) { onNoteSaved?.Invoke(saved, pinFailed); }
         return saved;
     }
 
-    public async Task<int> ReplayUnsavedAsync(CancellationToken cancellationToken = default)
+    public async Task<int> ReplayUnsavedAsync(CancellationToken cancellationToken = default,
+        Action<SavedCapture, bool>? onNoteSaved = null)
     {
         ThrowIfDisposed();
         var restored = 0;
@@ -161,7 +172,7 @@ public sealed class CapturePipeline : IDisposable
                 var job = Journal.Load(path);
                 // Persist OCR recovery or other normalized payload before attempting the append.
                 Journal.Store(job);
-                _ = Commit(job);
+                _ = Commit(job, null, onNoteSaved);
                 restored++;
             }
             catch (CaptureJournal.RecordException error)

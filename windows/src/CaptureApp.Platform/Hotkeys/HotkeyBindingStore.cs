@@ -1,11 +1,13 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
+using CaptureApp.Core;
 
 namespace CaptureApp.Platform.Hotkeys;
 
-/// <summary>Reads and updates the settings.json "shortcuts" object while preserving other settings.</summary>
+/// <summary>Reads and updates the settings.json "shortcuts" section while preserving the other sections.</summary>
 public sealed class HotkeyBindingStore
 {
+    private const string Section = "shortcuts";
+
     private readonly string _settingsPath;
 
     public HotkeyBindingStore(string settingsPath)
@@ -17,8 +19,8 @@ public sealed class HotkeyBindingStore
     public IReadOnlyDictionary<HotkeyAction, KeyChord> Load()
     {
         var bindings = new Dictionary<HotkeyAction, KeyChord>(HotkeyDefaults.All);
-        var root = ReadRoot();
-        if (root is null || !root.TryGetPropertyValue("shortcuts", out var shortcutsNode))
+        var shortcutsNode = SectionedJsonFile.ReadSection(_settingsPath, Section);
+        if (shortcutsNode is null)
         {
             return bindings;
         }
@@ -75,39 +77,21 @@ public sealed class HotkeyBindingStore
             HotkeyValidator.ThrowIfInvalid(chord);
         }
 
-        var root = ReadRoot() ?? new JsonObject();
-        if (root.TryGetPropertyValue("shortcuts", out var shortcutsNode) && shortcutsNode is not JsonObject)
+        SectionedJsonFile.Update(_settingsPath, Section, existing =>
         {
-            throw new InvalidDataException("The settings shortcuts value must be a JSON object.");
-        }
-
-        var shortcuts = shortcutsNode as JsonObject;
-        if (shortcuts is null)
-        {
-            shortcuts = new JsonObject();
-            root["shortcuts"] = shortcuts;
-        }
-
-        foreach (var (action, chord) in bindings)
-        {
-            shortcuts[action.ToString()] = chord.DisplayString;
-        }
-
-        var directory = Path.GetDirectoryName(_settingsPath) ?? throw new InvalidOperationException("Settings path has no parent directory.");
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{_settingsPath}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.WriteAllText(temporaryPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(temporaryPath, _settingsPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
+            if (existing is not null and not JsonObject)
             {
-                File.Delete(temporaryPath);
+                throw new InvalidDataException("The settings shortcuts value must be a JSON object.");
             }
-        }
+
+            var shortcuts = existing as JsonObject ?? new JsonObject();
+            foreach (var (action, chord) in bindings)
+            {
+                shortcuts[action.ToString()] = chord.DisplayString;
+            }
+
+            return shortcuts;
+        });
     }
 
     /// <summary>Validates and test-registers a new binding before atomically persisting it.</summary>
@@ -124,23 +108,5 @@ public sealed class HotkeyBindingStore
         bindings[action] = chord;
         Save(bindings);
         return availability with { Action = action };
-    }
-
-    private JsonObject? ReadRoot()
-    {
-        if (!File.Exists(_settingsPath))
-        {
-            return null;
-        }
-
-        try
-        {
-            var node = JsonNode.Parse(File.ReadAllText(_settingsPath));
-            return node as JsonObject ?? throw new InvalidDataException("The settings file root must be a JSON object.");
-        }
-        catch (JsonException exception)
-        {
-            throw new InvalidDataException("The settings file is corrupt; shortcut bindings were left unchanged.", exception);
-        }
     }
 }

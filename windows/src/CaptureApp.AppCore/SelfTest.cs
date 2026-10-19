@@ -3,11 +3,14 @@ using CaptureApp.Core;
 
 namespace CaptureApp.AppCore;
 
+/// What the App-supplied self-test sections receive.
+public sealed record SelfTestContext(string RunDirectory, string? ModelsDirectory, TextWriter Output, CancellationToken CancellationToken);
+
 /// Headless checks for AppCore. Platform, controller, and visual checks are added when those layers are connected.
 public static class SelfTest
 {
     public static async Task RunAsync(string directory, string? modelsDirectory = null, TextWriter? output = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Func<SelfTestContext, Task>? extension = null)
     {
         output ??= Console.Out;
         var parent = Path.GetFullPath(directory);
@@ -160,8 +163,12 @@ public static class SelfTest
 
             await pipeline.StopWatcherAsync().ConfigureAwait(false);
             await WritePass(output, "shutdown drain passed").ConfigureAwait(false);
-            await output.WriteLineAsync("DEFERRED  controller/UI self-test section (Platform and Overlay step)").ConfigureAwait(false);
-            await output.WriteLineAsync("DEFERRED  model and semantic checks (Embed and ModelInstall step)").ConfigureAwait(false);
+            await Shell.ControllerSelfTest.RunAsync(Path.Combine(runDirectory, "controller"), zone, output, cancellationToken).ConfigureAwait(false);
+            // Platform sections (OCR, helper status, architecture) and semantic checks are supplied by the App.
+            if (extension is not null)
+            {
+                await extension(new SelfTestContext(runDirectory, modelsDirectory, output, cancellationToken)).ConfigureAwait(false);
+            }
         }
         finally
         {
