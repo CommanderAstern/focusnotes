@@ -12,6 +12,98 @@ public sealed class NoteWriterExecutor() : CoreAreaExecutor("notewriter");
 public sealed class VaultNamingExecutor() : CoreAreaExecutor("vault-naming");
 public sealed class SessionStoreExecutor() : CoreAreaExecutor("sessionstore");
 public sealed class NoteParserExecutor() : CoreAreaExecutor("noteparser");
+public sealed class SearchIndexExecutor() : IAreaExecutor
+{
+    public string Area => "searchindex";
+
+    public Task<ScenarioExpected> ExecuteAsync(ScenarioInput input, CancellationToken cancellationToken = default)
+    {
+        using var execution = new SearchIndexExecution(input);
+        var results = new List<JsonElement>();
+        foreach (var op in input.Ops)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            object? value = execution.Perform(op);
+            results.Add(JsonSerializer.SerializeToElement(value));
+        }
+
+        return Task.FromResult(new ScenarioExpected { Files = execution.Files(), Results = results });
+    }
+
+    private sealed class SearchIndexExecution : IDisposable
+    {
+        private readonly string temporary = Path.Combine(Path.GetTempPath(), "captureapp-searchindex-conformance-" + Guid.NewGuid().ToString("N"));
+        private readonly string root;
+        private readonly ScenarioInput input;
+        private readonly Vault vault;
+        private readonly SearchIndex index;
+
+        internal SearchIndexExecution(ScenarioInput input)
+        {
+            this.input = input;
+            root = Path.Combine(temporary, "vault");
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(Path.Combine(temporary, "cache"));
+            root = NoteFile.ResolveSelectedRoot(root);
+            vault = new(root, homeDirectoryUrl: Path.Combine(temporary, "home"), namingRules: new() { WindowsRules = false });
+            foreach (var file in input.Files.OrderBy(x => x.Key, StringComparer.Ordinal))
+            {
+                Write(file.Key, file.Value);
+            }
+
+            index = new(vault, Path.Combine(temporary, "cache", "index.sqlite"), TimeZoneInfo.FindSystemTimeZoneById(input.TimeZone));
+        }
+
+        private string Url(string path)
+        {
+            _ = NoteFile.PathComponents(path);
+            return Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        private void Write(string path, string text)
+        {
+            var target = Url(path);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.WriteAllText(target, text, NoteFile.Utf8);
+            File.SetLastWriteTimeUtc(target, input.Clock.UtcDateTime);
+        }
+
+        private static string S(Dictionary<string, JsonElement> op, string key) => op.TryGetValue(key, out var value) && value.ValueKind != JsonValueKind.Null ? value.GetString()! : throw new JsonException("Missing " + key);
+
+        internal object? Perform(Dictionary<string, JsonElement> op)
+        {
+            switch (S(op, "op"))
+            {
+                case "sync":
+                    var stats = index.Sync();
+                    return new { added = stats.Added, updated = stats.Updated, removed = stats.Removed, unchanged = stats.Unchanged };
+                case "query":
+                    var limit = op.TryGetValue("limit", out var limitValue) ? limitValue.GetInt32() : 40;
+                    return index.Search(S(op, "text"), limit).Select(hit => new { id = hit.EmbeddingKey, title = hit.NoteTitle }).ToArray();
+                case "write":
+                    Write(S(op, "path"), S(op, "text"));
+                    return null;
+                case "remove":
+                    File.Delete(Url(S(op, "path")));
+                    return null;
+                case "reindex":
+                    index.Reindex(Url(S(op, "path")));
+                    return null;
+                default:
+                    throw new InvalidOperationException("Missing searchindex operation: " + S(op, "op"));
+            }
+        }
+
+        internal Dictionary<string, string> Files() => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).ToDictionary(path => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'), path => File.ReadAllText(path, NoteFile.Utf8), StringComparer.Ordinal);
+
+        public void Dispose()
+        {
+            index.Dispose();
+            Directory.Delete(temporary, true);
+        }
+    }
+}
+
 public abstract class CoreAreaExecutor(string area) : IAreaExecutor
 {
     public string Area { get; } = area;

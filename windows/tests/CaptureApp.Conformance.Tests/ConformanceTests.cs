@@ -13,14 +13,15 @@ public sealed class ConformanceTests
         new NoteWriterExecutor(),
         new VaultNamingExecutor(),
         new SessionStoreExecutor(),
-        new NoteParserExecutor()
+        new NoteParserExecutor(),
+        new SearchIndexExecutor()
     }.ToDictionary(e => e.Area, StringComparer.Ordinal);
     public static IEnumerable<TheoryDataRow<string>> Scenarios() => ScenarioLoader.LoadAll().Select(item =>
     {
         var scenario = item.Scenario;
         return new TheoryDataRow<string>(scenario.Area + "/" + scenario.Id)
         {
-            Skip = scenario.Area == "searchindex" ? "step 3b" : OperatingSystem.IsWindows() && scenario.SkipOn?.Contains("windows", StringComparer.Ordinal) == true ? scenario.SkipReason ?? throw new InvalidDataException("Platform skips require a reason.") : null
+            Skip = OperatingSystem.IsWindows() && scenario.SkipOn?.Contains("windows", StringComparer.Ordinal) == true ? scenario.SkipReason ?? throw new InvalidDataException("Platform skips require a reason.") : null
         };
     });
     [Theory]
