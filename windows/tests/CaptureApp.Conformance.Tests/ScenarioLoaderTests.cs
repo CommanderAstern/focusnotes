@@ -19,6 +19,17 @@ public sealed class ScenarioLoaderTests
             Assert.Equal(scenario.Area, new DirectoryInfo(Path.GetDirectoryName(path)!).Name);
             Assert.Equal(scenario.Id, Path.GetFileNameWithoutExtension(path));
             Assert.True(identities.Add($"{scenario.Area}/{scenario.Id}"));
+            if (scenario.SkipOn is not null)
+            {
+                Assert.NotEmpty(scenario.SkipOn);
+                Assert.All(scenario.SkipOn, platform => Assert.Equal("windows", platform));
+                Assert.False(string.IsNullOrWhiteSpace(scenario.SkipReason));
+            }
+            else
+            {
+                Assert.Null(scenario.SkipReason);
+            }
+
             Assert.NotNull(scenario.Input);
             Assert.Equal(TimeSpan.Zero, scenario.Input.Clock.Offset);
             Assert.False(string.IsNullOrWhiteSpace(scenario.Input.TimeZone));
@@ -43,8 +54,7 @@ public sealed class ScenarioLoaderTests
 
         foreach (var area in ScenarioLoader.KnownAreas)
         {
-            Assert.True(scenarios.Count(item => item.Scenario.Area == area) >= 5,
-                string.Create(CultureInfo.InvariantCulture, $"Area {area} needs at least five scenarios."));
+            Assert.True(scenarios.Count(item => item.Scenario.Area == area) >= 5, string.Create(CultureInfo.InvariantCulture, $"Area {area} needs at least five scenarios."));
         }
     }
 }

@@ -80,4 +80,13 @@ dotnet build -c Release --no-restore -warnaserror
 dotnet test -c Release --no-build
 ```
 
-`CaptureApp.Conformance.Tests` currently validates all scenarios, identities, areas, and expected result counts using System.Text.Json. Step 3 supplies each area's executor through `IAreaExecutor`, keyed by `Area`, and compares the returned file tree and results to these same expected blocks. No Core behavior has been ported by this scaffold.
+`CaptureApp.Conformance.Tests` validates every scenario with System.Text.Json and executes each non-search scenario as a separate xUnit theory case. `IAreaExecutor`, keyed by `Area`, returns the complete file tree and ordered operation results for exact comparison. These executions explicitly turn `VaultNamingRules.WindowsRules` off on every operating system to compare against Mac truth. The `searchindex` executor is intentionally absent; only those theory rows are skipped with reason `step 3b`.
+
+A scenario whose seeded file paths cannot exist on Windows may add top-level metadata:
+
+```json
+"skipOn": ["windows"],
+"skipReason": "The seeded file name is illegal on Windows."
+```
+
+The C# loader accepts these optional fields, requires a non-empty reason for each exclusion, and skips only the listed operating system. The Swift runner ignores them during validation. Never change `expected` to accommodate an operating system. Cover the Windows naming outcome separately in `VaultNamingWindowsTests.cs`, using `WindowsRules` on. No current Core scenario needs a platform exclusion. The Swift writer reconstructs the known fixture schema when regenerating, so reapply any future skip metadata after regeneration (without changing expected values).

@@ -10,6 +10,8 @@ public sealed record Scenario
     public required string Description { get; init; }
     public required ScenarioInput Input { get; init; }
     public required ScenarioExpected Expected { get; init; }
+    public string[]? SkipOn { get; init; }
+    public string? SkipReason { get; init; }
 }
 
 public sealed record ScenarioInput
@@ -30,8 +32,14 @@ public static class ScenarioLoader
 {
     public static IReadOnlySet<string> KnownAreas { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
-        "notetitle", "router", "captureformat", "notewriter", "vault-naming",
-        "sessionstore", "noteparser", "searchindex"
+        "notetitle",
+        "router",
+        "captureformat",
+        "notewriter",
+        "vault-naming",
+        "sessionstore",
+        "noteparser",
+        "searchindex"
     };
 
     private static readonly JsonSerializerOptions Options = new()
@@ -39,7 +47,6 @@ public static class ScenarioLoader
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
-
     public static IReadOnlyList<(string Path, Scenario Scenario)> LoadAll()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -54,11 +61,7 @@ public static class ScenarioLoader
         }
 
         var scenarios = Path.Combine(directory.FullName, "conformance", "scenarios");
-        return Directory.EnumerateFiles(scenarios, "*.json", SearchOption.AllDirectories)
-            .Order(StringComparer.Ordinal)
-            .Select(path => (path, JsonSerializer.Deserialize<Scenario>(File.ReadAllText(path), Options)
-                ?? throw new JsonException($"Null scenario: {path}")))
-            .ToArray();
+        return Directory.EnumerateFiles(scenarios, "*.json", SearchOption.AllDirectories).Order(StringComparer.Ordinal).Select(path => (path, JsonSerializer.Deserialize<Scenario>(File.ReadAllText(path), Options) ?? throw new JsonException($"Null scenario: {path}"))).ToArray();
     }
 }
 
@@ -66,5 +69,6 @@ public static class ScenarioLoader
 public interface IAreaExecutor
 {
     string Area { get; }
+
     Task<ScenarioExpected> ExecuteAsync(ScenarioInput input, CancellationToken cancellationToken = default);
 }
