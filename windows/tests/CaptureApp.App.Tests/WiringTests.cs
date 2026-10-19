@@ -54,3 +54,19 @@ public sealed class WiringTests
         }
     }
 }
+
+public sealed class ForegroundTrackerTests
+{
+    [Theory]
+    [InlineData("Shell_TrayWnd", true)]
+    [InlineData("Shell_SecondaryTrayWnd", true)]
+    [InlineData("NotifyIconOverflowWindow", true)]
+    [InlineData("TopLevelWindowForOverflowXamlIsland", true)]
+    [InlineData("Progman", true)]
+    [InlineData("WorkerW", true)]
+    [InlineData("Notepad", false)]
+    [InlineData("Chrome_WidgetWin_1", false)]
+    [InlineData(null, false)]
+    public void ShellClassesAreNeverCaptureTargets(string? className, bool isShell) =>
+        Assert.Equal(isShell, ForegroundTracker.IsShellClass(className));
+}

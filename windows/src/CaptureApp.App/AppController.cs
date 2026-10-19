@@ -9,6 +9,7 @@ using CaptureApp.Core;
 using CaptureApp.Embed;
 using CaptureApp.ModelInstall;
 using CaptureApp.Overlay;
+using CaptureApp.Overlay.Interop;
 using CaptureApp.Platform.Capture;
 using CaptureApp.Platform.Hotkeys;
 using CaptureApp.Platform.Ocr;
@@ -37,6 +38,8 @@ internal sealed partial class AppController : IDisposable
     private PowerMonitor? power;
     private SemanticIndexer? semantic;
     private bool openedSetupThisLaunch;
+    private readonly ForegroundTracker foreground = new();
+    private readonly FocusReturnTracker focusProbe = new();
     private bool quitting;
     private bool disposed;
 
@@ -222,6 +225,8 @@ internal sealed partial class AppController : IDisposable
         hotkeys?.Dispose();
         tray?.Dispose();
         power?.Dispose();
+        foreground.Dispose();
+        focusProbe.Dispose();
         host?.Dispose();
         if (Ocr.IsValueCreated) { Ocr.Value.Dispose(); }
         pipeline?.Dispose();

@@ -5,6 +5,7 @@ using CaptureApp.AppCore;
 using CaptureApp.AppCore.Shell;
 using CaptureApp.Core;
 using CaptureApp.Overlay;
+using CaptureApp.Platform;
 using CaptureApp.Platform.Context;
 using CaptureApp.Platform.Hotkeys;
 using CaptureApp.Platform.Shell;
@@ -129,7 +130,7 @@ internal sealed partial class AppController
         switch (id)
         {
             case MenuIds.FinishSetup: OpenSetup(manual: true); break;
-            case MenuIds.CaptureSelection: AfterMenu(() => Capture(CaptureTrigger.Selection, false, FrontmostContext.Capture())); break;
+            case MenuIds.CaptureSelection: AfterMenu(() => _ = CaptureSelectionFromMenuAsync()); break;
             case MenuIds.CaptureArea: AfterMenu(() => Capture(CaptureTrigger.Region, false, FrontmostContext.Capture())); break;
             case MenuIds.Search: OpenSearch(); break;
             case MenuIds.Session: ToggleSession(); break;
@@ -155,6 +156,28 @@ internal sealed partial class AppController
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         timer.Tick += (_, _) => { timer.Stop(); action(); };
         timer.Start();
+    }
+
+    /// Returns to the app the user was in before the tray menu took the foreground, then runs the normal capture.
+    private async Task CaptureSelectionFromMenuAsync()
+    {
+        var target = foreground.Last;
+        if (target == 0 || !focusProbe.CanRestore(target))
+        {
+            Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea))));
+            return;
+        }
+
+        // The menu click was the last input, so Windows lets us hand the foreground back.
+        ForegroundTracker.BringToForeground(target);
+        for (var waited = 0; waited < 300 && ForegroundTracker.Foreground() != target; waited += 10) { await Task.Delay(10); }
+        if (ForegroundTracker.Foreground() != target)
+        {
+            Coordinator.ShowToast(new(AppToastStyle.Warning, PlatformStrings.NoTextSelected, Strings.NoTextSelectedSubtitle(BindingText(HotkeyAction.CaptureArea))));
+            return;
+        }
+
+        Capture(CaptureTrigger.Selection, false, FrontmostContext.Capture());
     }
 
     private void OpenNotesFolder()
