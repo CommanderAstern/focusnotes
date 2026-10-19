@@ -41,6 +41,8 @@ internal sealed class ChromeButton : System.Windows.Controls.Button
 /// </summary>
 public sealed class QuickNoteView : OverlaySurface, IDisposable
 {
+    /// <summary>Marks text that is trimmed with an ellipsis on purpose, so layout checks do not flag it.</summary>
+    public const string TrimmedTag = "Trimmed";
     private const double BandsHeight = Tokens.QuickTopBandHeight + Tokens.QuickFooterHeight;
     private readonly Border topBand = Transparent(), footerBand = Transparent(), hover = Transparent();
     private readonly Canvas chrome = new(), footer = new();
@@ -100,7 +102,7 @@ public sealed class QuickNoteView : OverlaySurface, IDisposable
         AutomationProperties.SetName(this, "Write a note");
         AutomationProperties.SetName(Editor, "Note text");
         cluster.SetResourceReference(Border.BackgroundProperty, "QuickClusterFill"); cluster.SetResourceReference(Border.BorderBrushProperty, "QuickClusterBorder");
-        title.TextAlignment = TextAlignment.Center; title.IsHitTestVisible = false; title.Opacity = Tokens.QuickTitleRestAlpha; pin.Opacity = Tokens.QuickTitleRestAlpha;
+        title.TextAlignment = TextAlignment.Center; title.TextTrimming = TextTrimming.CharacterEllipsis; title.TextWrapping = TextWrapping.NoWrap; title.Tag = TrimmedTag; title.IsHitTestVisible = false; title.Opacity = Tokens.QuickTitleRestAlpha; pin.Opacity = Tokens.QuickTitleRestAlpha;
         pin.IsHitTestVisible = false; pin.Visibility = isPinned ? Visibility.Visible : Visibility.Collapsed;
         placeholder.IsHitTestVisible = false; footer.IsHitTestVisible = false; chrome.Opacity = Tokens.Zero; footer.Opacity = Tokens.Zero; chrome.IsHitTestVisible = false;
         foreach (var element in new UIElement[] { hover, topBand, footerBand, Editor, placeholder, title, pin, chrome, footer }) Body.Children.Add(element);

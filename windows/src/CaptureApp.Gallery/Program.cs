@@ -103,6 +103,7 @@ internal static class Program
             Require(double.IsFinite(element.ActualWidth) && double.IsFinite(element.ActualHeight), state + ": finite layout");
             Require(element.DesiredSize.Width <= element.ActualWidth + element.Margin.Left + element.Margin.Right + Tokens.LayoutTolerance && element.DesiredSize.Height <= element.ActualHeight + element.Margin.Top + element.Margin.Bottom + Tokens.LayoutTolerance, $"{state}: {element.GetType().Name} DesiredSize {element.DesiredSize} exceeds bounds {element.ActualWidth} × {element.ActualHeight}");
             if (element is not TextBlock text || string.IsNullOrEmpty(text.Text)) continue;
+            var trimmed = text.Tag is QuickNoteView.TrimmedTag && text.TextTrimming != TextTrimming.None; // Intentional ellipsis: only the height must fit.
             var natural = new TextBlock
             {
                 Text = text.Text, FontFamily = text.FontFamily, FontSize = text.FontSize, FontWeight = text.FontWeight,
@@ -111,7 +112,7 @@ internal static class Program
             };
             VisualTreeHelper.SetRootDpi(natural, VisualTreeHelper.GetDpi(root));
             natural.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Require(natural.DesiredSize.Width <= text.ActualWidth + Tokens.LayoutTolerance && natural.DesiredSize.Height <= text.ActualHeight + Tokens.LayoutTolerance, $"{state}: text '{text.Text}' needs {natural.DesiredSize}, has {text.ActualWidth} × {text.ActualHeight}");
+            Require((trimmed || natural.DesiredSize.Width <= text.ActualWidth + Tokens.LayoutTolerance) && natural.DesiredSize.Height <= text.ActualHeight + Tokens.LayoutTolerance, $"{state}: text '{text.Text}' needs {natural.DesiredSize}, has {text.ActualWidth} × {text.ActualHeight}");
         }
     }
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
@@ -153,7 +154,7 @@ internal static class Program
             case "toast": case "success": case "warning": case "session": case "copied":
                 var toast = new ToastController { OnExpire = Finish }; liveController = toast;
                 var style = Enum.TryParse<ToastStyle>(component, true, out var parsed) ? parsed : ToastStyle.Success;
-                toast.Show(new Toast(style, "Capture saved", "Added to System Design", new ToastHint("Alt+Shift+C", "name"))); break;
+                toast.Show(new Toast(style, "Capture saved", "Added to System Design", new ToastHint("Ctrl+Alt+Shift+Q", "name"))); break;
             case "search":
                 var search = new SearchPanelController(); liveController = search;
                 search.Present((text, _) => Task.FromResult<IReadOnlyList<SearchSection>>(text.Length == 0 ? Fixtures.Recent : Fixtures.Matches.Where(s => s.Rows.Any(r => r.Title.Contains(text, StringComparison.OrdinalIgnoreCase))).ToArray()),

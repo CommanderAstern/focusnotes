@@ -77,6 +77,7 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
         var view = area.TextView;
         view.LineTransformers.Add(new MarkdownColorizer(this));
         view.ElementGenerators.Insert(0, new MarkdownGenerator(this));
+        view.ElementGenerators.Insert(0, new LineSpacerGenerator(this));
         view.BackgroundRenderers.Add(new MarkdownBackground(this));
         Inner.Document.Changed += OnDocumentChanged;
         Inner.TextChanged += (_, e) => TextChanged?.Invoke(this, e);
@@ -107,8 +108,11 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
         Inner.Select(offset + text.Length, 0);
     }
     public void Select(int start, int length) => Inner.Select(start, length);
-    public double LineHeight => Inner.TextArea.TextView.DefaultLineHeight is > 0 and var height && double.IsFinite(height)
-        ? Math.Ceiling(height) : Math.Ceiling(Tokens.EditorFontSize * 1.4);
+    /// <summary>Body line height: the font's natural height times the Mac 1.25 multiple.</summary>
+    public double LineHeight => Math.Ceiling(NaturalLineHeight * Tokens.EditorLineHeightMultiple);
+    private double NaturalLineHeight => Family("Font.UI").LineSpacing * Tokens.EditorFontSize;
+    /// <summary>Height above the baseline that brings a body line up to <see cref="LineHeight"/>.</summary>
+    internal double SpacerRise => LineHeight - (Family("Font.UI").LineSpacing - Family("Font.UI").Baseline) * Tokens.EditorFontSize;
     public double VerticalOffset => Inner.VerticalOffset;
     public void ScrollToCaret() => Inner.TextArea.Caret.BringCaretToView();
     public void ScrollToVerticalOffset(double offset) => Inner.ScrollToVerticalOffset(offset);
@@ -188,11 +192,13 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
         }
         return fenceAfter[lineNumber - 2];
     }
-    private bool IsLineActive(DocumentLine line) => line.LineNumber >= activeFirst && line.LineNumber <= activeLast;
+    internal bool IsLineActive(DocumentLine line) => line.LineNumber >= activeFirst && line.LineNumber <= activeLast;
     private Replacement[] ReplacementsFor(DocumentLine line)
     {
         if (replacements.TryGetValue(line, out var cached)) return cached;
         var model = ModelFor(line); var list = new List<Replacement>();
+        // Fence delimiters vanish off the caret line, like other syntax.
+        if (model.Kind == LineKind.Fence && !IsLineActive(line) && line.Length > 0) list.Add(new Replacement(0, line.Length, ReplacementKind.Hidden));
         if (model.Kind == LineKind.Text)
         {
             var active = IsLineActive(line);
@@ -202,7 +208,7 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
                 if (model.TaskMarker is { } task) list.Add(new Replacement(task.Start, task.Length, ReplacementKind.Checkbox));
                 list.AddRange(model.Syntax.Select(s => new Replacement(s.Start, s.Length, ReplacementKind.Hidden)));
             }
-            if (model.BulletIndex is { } bullet && (active || model.TaskMarker is null)) list.Add(new Replacement(bullet, 1, ReplacementKind.Bullet));
+            if (model.BulletIndex is { } bullet && (active || model.TaskMarker is null)) list.Add(new Replacement(bullet, 2, ReplacementKind.Bullet)); // The marker and its space become one fixed-width cell.
         }
         var ordered = new List<Replacement>(); var end = 0;
         foreach (var item in list.Where(r => r.Length > 0).OrderBy(r => r.Start))
@@ -225,13 +231,20 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
             return item.Kind switch
             {
                 ReplacementKind.Hidden => new HiddenElement(item.Length),
-                ReplacementKind.Bullet => new FormattedTextElement(Tokens.EditorBullet, item.Length),
+                ReplacementKind.Bullet => new InlineObjectElement(item.Length, BulletCell()),
                 ReplacementKind.Quote => new InlineObjectElement(item.Length, new Canvas { Width = Tokens.EditorQuoteIndent, Height = 1 }),
                 _ => new InlineObjectElement(item.Length, new CheckboxVisual(this, line, item.Start + 3, ModelFor(line).TaskChecked))
             };
         }
         return null;
     }
+    private TextBlock BulletCell()
+    {
+        var cell = new TextBlock { Text = Tokens.EditorBullet, FontSize = Tokens.EditorFontSize, FontWeight = FontWeights.SemiBold, FontFamily = Family("Font.UI"), Width = ListMarkerWidth };
+        cell.Foreground = Resolve("Secondary");
+        return cell;
+    }
+    internal const double ListMarkerWidth = Tokens.EditorCheckboxSize + 3;
     private void OnDocumentChanged(object? sender, DocumentChangeEventArgs e)
     {
         models.Clear(); replacements.Clear();
@@ -382,6 +395,26 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
 
     /// <summary>Syntax on an inactive line: an empty run that still owns the document characters.</summary>
     private sealed class HiddenElement(int length) : FormattedTextElement("", length);
+    /// <summary>
+    /// Emulates the 1.25 line height: a zero-width inline object at each line start whose rise lifts the line to the body height.
+    /// </summary>
+    private sealed class LineSpacerGenerator(MarkdownEditor owner) : VisualLineElementGenerator
+    {
+        private bool produced;
+        public override void StartGeneration(ITextRunConstructionContext context) { base.StartGeneration(context); produced = false; }
+        public override int GetFirstInterestedOffset(int startOffset)
+        {
+            if (produced) return -1;
+            var line = CurrentContext.VisualLine.FirstDocumentLine;
+            if (owner.ModelFor(line).Kind == LineKind.Fence && !owner.IsLineActive(line)) return -1; // Collapsed delimiter.
+            return startOffset <= line.Offset ? line.Offset : -1;
+        }
+        public override VisualLineElement? ConstructElement(int offset)
+        {
+            produced = true;
+            return new InlineObjectElement(0, new Canvas { Width = 0, Height = owner.SpacerRise });
+        }
+    }
     private sealed class MarkdownColorizer(MarkdownEditor owner) : DocumentColorizingTransformer
     {
         protected override void ColorizeLine(DocumentLine line)
@@ -393,8 +426,9 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
                 if (end <= style.Start) continue;
                 ChangeLinePart(line.Offset + style.Start, line.Offset + end, element => owner.Apply(element.TextRunProperties, style));
             }
-            if (model.BulletIndex is { } bullet)
-                ChangeLinePart(line.Offset + bullet, line.Offset + bullet + 1, element => owner.Apply(element.TextRunProperties, new MarkdownStyle(0, 1, Bold: true)));
+            // A collapsed fence delimiter keeps only a sliver of height.
+            if (model.Kind == LineKind.Fence && !owner.IsLineActive(line) && line.Length > 0)
+                ChangeLinePart(line.Offset, line.EndOffset, element => element.TextRunProperties.SetFontRenderingEmSize(4));
         }
     }
     private sealed class MarkdownGenerator(MarkdownEditor owner) : VisualLineElementGenerator
@@ -413,13 +447,14 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
             var scroll = textView.VerticalOffset; Rect? block = null;
             void Flush()
             {
-                if (block is { } rect) drawingContext.DrawRoundedRectangle(owner.Resolve("CodeBackground"), null, rect, Tokens.CodeBlockRadius, Tokens.CodeBlockRadius);
+                if (block is { } rect) drawingContext.DrawRoundedRectangle(owner.Resolve("CodeBackground"), null, Rect.Inflate(rect, Tokens.Zero, 2), Tokens.CodeBlockRadius, Tokens.CodeBlockRadius);
                 block = null;
             }
             foreach (var visual in textView.VisualLines)
             {
                 var line = visual.FirstDocumentLine; var model = owner.ModelFor(line);
                 var area = new Rect(Tokens.Zero, visual.VisualTop - scroll, textView.ActualWidth, visual.Height);
+                if (model.Kind == LineKind.Fence && !owner.IsLineActive(line)) { Flush(); continue; }
                 if (model.Kind != LineKind.Text) { block = block is { } open ? Rect.Union(open, area) : area; continue; }
                 Flush();
                 if (model.IsQuote)
@@ -435,19 +470,19 @@ public sealed class MarkdownEditor : Grid, ITypingSurface, IDisposable
     /// <summary>The accent checkbox that replaces a task marker on inactive lines; a click toggles the task.</summary>
     private sealed class CheckboxVisual : FrameworkElement
     {
+        // The box is centred on the x-height middle (about 4 pt above the baseline).
+        private const double CheckboxRise = Tokens.EditorCheckboxSize - 2.5;
         private readonly MarkdownEditor owner; private readonly DocumentLine line; private readonly int index; private readonly bool isChecked;
         public CheckboxVisual(MarkdownEditor owner, DocumentLine line, int index, bool isChecked)
         {
             this.owner = owner; this.line = line; this.index = index; this.isChecked = isChecked;
-            Width = Tokens.EditorCheckboxSize + Tokens.EditorCheckboxGap; Height = Tokens.EditorCheckboxSize;
+            Width = ListMarkerWidth; Height = CheckboxRise; // Height is the rise above the baseline; the box hangs below it.
             Cursor = Cursors.Hand;
-            // Sit the box on the text's midline rather than hanging it from the baseline.
-            TextBlock.SetBaselineOffset(this, Tokens.EditorCheckboxSize - 1.5);
         }
         protected override void OnRender(DrawingContext drawingContext)
         {
             var box = new Rect(Tokens.Zero, Tokens.Zero, Tokens.EditorCheckboxSize, Tokens.EditorCheckboxSize);
-            drawingContext.DrawRectangle(Brushes.Transparent, null, new Rect(RenderSize));
+            drawingContext.DrawRectangle(Brushes.Transparent, null, new Rect(Tokens.Zero, Tokens.Zero, ListMarkerWidth, Tokens.EditorCheckboxSize));
             if (isChecked)
             {
                 drawingContext.DrawRoundedRectangle(owner.Resolve("BrandAccent"), null, box, Tokens.EditorCheckboxRadius, Tokens.EditorCheckboxRadius);
