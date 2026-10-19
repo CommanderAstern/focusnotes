@@ -54,7 +54,7 @@ internal sealed record FileMetadata(ulong Device, ulong Inode, long Size, long M
             return FromUnix(value, Native.LinkCount(path, null));
         }
 
-        using var handle = Native.CreateFile(path, 0, 7, 0, 3, 0x02200000, 0);
+        using var handle = Native.CreateFile(ExtendedPath(path), 0, 7, 0, 3, 0x02200000, 0);
         if (handle.IsInvalid)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -71,6 +71,18 @@ internal sealed record FileMetadata(ulong Device, ulong Inode, long Size, long M
         }
 
         return FromWindows(handle);
+    }
+
+    // Raw Win32 calls honour MAX_PATH unless the path is \\?\-prefixed (the .NET file APIs do this themselves).
+    internal static string ExtendedPath(string path)
+    {
+        if (path.Length < 240 || path.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            return path;
+        }
+
+        var full = Path.GetFullPath(path);
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
     internal static FileMetadata Of(FileStream stream)

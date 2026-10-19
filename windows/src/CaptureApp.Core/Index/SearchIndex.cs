@@ -72,23 +72,27 @@ public sealed class SearchIndex : IDisposable
                 continue;
             }
 
-            VaultFileSnapshot? currentMetadata;
-            try
-            {
-                currentMetadata = vault.FileSnapshotForNoteId(note.Id, includingContents: false);
-            }
-            catch (Exception error) when (IsUnreadableFileError(error))
-            {
-                currentMetadata = null;
-            }
-
-            if (currentMetadata is null)
-            {
-                continue;
-            }
-
+            // A note absent from the index is read in full below, so skip the redundant metadata-only open.
             var old = previous.GetValueOrDefault(note.Id);
-            if (old == FingerprintOf(currentMetadata))
+            VaultFileSnapshot? currentMetadata = note.Snapshot;
+            if (old is not null)
+            {
+                try
+                {
+                    currentMetadata = vault.FileSnapshotForNoteId(note.Id, includingContents: false);
+                }
+                catch (Exception error) when (IsUnreadableFileError(error))
+                {
+                    currentMetadata = null;
+                }
+
+                if (currentMetadata is null)
+                {
+                    continue;
+                }
+            }
+
+            if (old is not null && old == FingerprintOf(currentMetadata!))
             {
                 previous.Remove(note.Id);
                 unchanged++;
@@ -436,7 +440,7 @@ public sealed class SearchIndex : IDisposable
                 """);
             using var fts = database.Prepare("""
                 INSERT INTO blocks_fts(rowid, title, body, ocr)
-                VALUES (?, ?, ?, coalesce((SELECT replace(replace(text, char(2), ''), char(3), '') FROM image_text WHERE asset_path = ?), ''))
+                VALUES (last_insert_rowid(), ?, ?, coalesce((SELECT replace(replace(text, char(2), ''), char(3), '') FROM image_text WHERE asset_path = ?), ''))
                 """);
             var title = FtsText(parsed.Title);
             for (var ordinal = 0; ordinal < parsed.Blocks.Count; ordinal++)
@@ -446,7 +450,7 @@ public sealed class SearchIndex : IDisposable
                     SQLiteValue.Int(noteId), SQLiteValue.Int(ordinal), block.CaptureId is { } captureId ? SQLiteValue.Text(captureId.ToString("D").ToLowerInvariant()) : SQLiteValue.Null,
                     SQLiteValue.Text(BlockKindName(block.Kind)), block.CreatedAt is { } date ? SQLiteValue.Double(ToUnixSeconds(date)) : SQLiteValue.Null,
                     SQLiteValue.Text(block.SourceApp), SQLiteValue.Text(block.WindowTitle), SQLiteValue.Text(block.Body), SQLiteValue.Text(block.AssetPath));
-                fts.Run(SQLiteValue.Int(database.LastInsertedId), SQLiteValue.Text(title), SQLiteValue.Text(FtsText(block.Body)), SQLiteValue.Text(block.AssetPath));
+                fts.Run(SQLiteValue.Text(title), SQLiteValue.Text(FtsText(block.Body)), SQLiteValue.Text(block.AssetPath));
             }
         });
     }

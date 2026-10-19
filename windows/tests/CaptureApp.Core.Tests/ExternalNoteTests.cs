@@ -16,7 +16,7 @@ public sealed class ExternalNoteTests
         Assert.DoesNotContain(e.Vault.ListNotes(), n => n.Url == unregistered);
         var capture = CheckVault.Capture("# /Desktop/Registered\n\nexternal body", CaptureContentKind.Note);
         var prepared = e.Service.PrepareNote(capture, CheckVault.Zone);
-        Assert.Equal(Path.Combine(e.Home, "Desktop/Registered.md"), prepared.Destination.Url);
+        Assert.Equal(Path.GetFullPath(Path.Combine(e.Home, "Desktop/Registered.md")), prepared.Destination.Url);
         e.Service.Save(prepared);
         var location = e.Vault.NoteLocation(new Uri(prepared.Destination.Url).AbsoluteUri);
         Assert.Equal(NotePathScope.Home, location.Scope);

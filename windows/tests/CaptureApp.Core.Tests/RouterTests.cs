@@ -51,7 +51,7 @@ public sealed class RouterTests
         e.Write("Root standup.md", "# Standup\n");
         Assert.Equal(NoteKind.Note, Router.Destination("Standup", null, e.Vault.ListNotes(), e.Vault).Kind);
         var home = Router.Destination("/Desktop/science/math/trigonometry", null, notes, e.Vault);
-        Assert.Equal(Path.Combine(e.Home, "Desktop/science/math/trigonometry.md"), home.Url);
+        Assert.Equal(Path.GetFullPath(Path.Combine(e.Home, "Desktop/science/math/trigonometry.md")), home.Url);
         Assert.Equal("trigonometry", home.Title);
         Assert.Equal(NoteKind.Note, home.Kind);
         Assert.Throws<NotePathNameException>(() => Router.Destination("science/../escape", null, notes, e.Vault));

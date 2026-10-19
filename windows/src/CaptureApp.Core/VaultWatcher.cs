@@ -53,10 +53,11 @@ public sealed class VaultWatcher : IDisposable
     private readonly Dictionary<string, WatcherChangeTypes> pendingRoot = new(StringComparer.Ordinal);
     private readonly HashSet<string> issues = new(StringComparer.Ordinal);
     private readonly HashSet<string> failedParents = new(PathComparer);
+    private readonly Dictionary<string, int> parentRetries = new(PathComparer);
     private readonly Queue<VaultChange> deliveries = new();
     private Dictionary<string, WatchSnapshot> rootSnapshot = new(StringComparer.Ordinal);
     private DirectoryWatch? root;
-    private Timer? rootTimer, externalTimer, fallbackTimer, deliveryTimer;
+    private Timer? rootTimer, externalTimer, fallbackTimer, deliveryTimer, parentRetryTimer;
     private WatchSnapshot? rootIdentity;
     private WatchSnapshot? registryFingerprint;
     private (WatchSnapshot? Fingerprint, ExternalNoteRegistryError Error, int? Version)? registryFailure;
@@ -124,6 +125,7 @@ public sealed class VaultWatcher : IDisposable
             externalTimer?.Dispose(); externalTimer = null;
             fallbackTimer?.Dispose(); fallbackTimer = null;
             deliveryTimer?.Dispose(); deliveryTimer = null;
+            parentRetryTimer?.Dispose(); parentRetryTimer = null; parentRetries.Clear();
             external.Clear(); fingerprints.Clear(); fallbackIds.Clear(); pendingExternal.Clear();
             pendingRoot.Clear(); rootSnapshot.Clear(); issues.Clear(); failedParents.Clear(); deliveries.Clear();
             registryFingerprint = null; registryFailure = null; registryGeneration = null; registryParent = null;
@@ -259,11 +261,13 @@ public sealed class VaultWatcher : IDisposable
                 else
                 {
                     parents.Remove(path);
-                    if (replacement is null) { failedParents.Add(path); }
-                    else { parents[path] = replacement; }
+                    // A watched directory deleted and recreated in place races this handler (Windows reports
+                    // access-denied on deletion). Let ReconcileParents decide so a missing path is not poisoned.
+                    if (replacement is not null) { parents[path] = replacement; }
+                    else if (watch.Errors >= 3) { failedParents.Add(path); }
                 }
 
-                if (replacement is null) { ReportIssue("watch-unavailable:" + path); }
+                if (replacement is null && (recursive || watch.Errors >= 3)) { ReportIssue("watch-unavailable:" + path); }
                 ReconcileParents();
                 UpdateFallbackTimer();
             }
@@ -509,8 +513,13 @@ public sealed class VaultWatcher : IDisposable
         foreach (var path in desired.Where(p => !parents.ContainsKey(p) && !failedParents.Contains(p)))
         {
             var watch = CreateWatch(path, recursive: false);
-            if (watch is null) { failedParents.Add(path); ReportIssue("watch-unavailable:" + path); }
-            else { parents[path] = watch; issues.Remove("watch-unavailable:" + path); }
+            if (watch is null)
+            {
+                failedParents.Add(path);
+                ReportIssue("watch-unavailable:" + path);
+                ScheduleParentRetry(path);
+            }
+            else { parents[path] = watch; parentRetries.Remove(path); issues.Remove("watch-unavailable:" + path); }
         }
 
         fallbackIds.Clear();
@@ -576,6 +585,27 @@ public sealed class VaultWatcher : IDisposable
                 if (generation == epoch && running && fallbackTimer is not null) { PollFallbacks(); }
             }
         }, null, fallbackInterval, fallbackInterval);
+    }
+
+    // A parent can fail transiently (directory recreated while the old handle is closing); retry briefly.
+    private void ScheduleParentRetry(string path)
+    {
+        var attempts = parentRetries.GetValueOrDefault(path);
+        if (attempts >= 5) { return; }
+        parentRetries[path] = attempts + 1;
+        if (parentRetryTimer is not null) { return; }
+        var generation = epoch;
+        parentRetryTimer = new Timer(_ =>
+        {
+            lock (gate)
+            {
+                if (generation != epoch || !running) { return; }
+                parentRetryTimer?.Dispose(); parentRetryTimer = null;
+                failedParents.RemoveWhere(p => parentRetries.GetValueOrDefault(p) is > 0 and < 5);
+                ReconcileParents();
+                UpdateFallbackTimer();
+            }
+        }, null, TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan);
     }
 
     private void ScheduleRoot()

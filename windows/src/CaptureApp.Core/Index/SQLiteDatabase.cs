@@ -14,6 +14,8 @@ internal readonly record struct SQLiteValue(object? Value)
 internal sealed class SQLiteDatabase : IDisposable
 {
     private readonly SqliteConnection connection;
+    // Reused across calls so each SQL text is prepared once (as Swift's long-lived statements).
+    private readonly Dictionary<string, SQLiteStatement> cached = new(StringComparer.Ordinal);
 
     internal SQLiteDatabase(string path, bool memory = false)
     {
@@ -55,7 +57,11 @@ internal sealed class SQLiteDatabase : IDisposable
 
     internal void Execute(string sql, params SQLiteValue[] values)
     {
-        using var statement = Prepare(sql);
+        if (!cached.TryGetValue(sql, out var statement))
+        {
+            cached[sql] = statement = Prepare(sql);
+        }
+
         statement.Run(values);
     }
 
@@ -71,16 +77,16 @@ internal sealed class SQLiteDatabase : IDisposable
 
     internal T Transaction<T>(Func<T> body)
     {
-        Exec("BEGIN IMMEDIATE");
+        Execute("BEGIN IMMEDIATE");
         try
         {
             var result = body();
-            Exec("COMMIT");
+            Execute("COMMIT");
             return result;
         }
         catch
         {
-            try { Exec("ROLLBACK"); }
+            try { Execute("ROLLBACK"); }
             catch (SqliteException) { }
             throw;
         }
@@ -92,7 +98,16 @@ internal sealed class SQLiteDatabase : IDisposable
         return true;
     });
 
-    public void Dispose() => connection.Dispose();
+    public void Dispose()
+    {
+        foreach (var statement in cached.Values)
+        {
+            statement.Dispose();
+        }
+
+        cached.Clear();
+        connection.Dispose();
+    }
 }
 
 internal sealed class SQLiteStatement : IDisposable
