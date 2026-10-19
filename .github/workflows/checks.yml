@@ -161,8 +161,18 @@ jobs:
           dotnet publish src/CaptureApp.App -c Release -r $rid --self-contained -o "$env:RUNNER_TEMP/publish"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Get-ChildItem "$env:RUNNER_TEMP/publish" -Filter *.exe | Where-Object { $_.Name -notmatch 'EmbedHelper' } | Select-Object -First 1
-          & $exe.FullName --self-test "$env:RUNNER_TEMP/selftest" --models "$env:CAPTUREAPP_MODELS_DIR" | Tee-Object -FilePath "$env:RUNNER_TEMP/selftest.log"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $started = Get-Date
+          & $exe.FullName --self-test "$env:RUNNER_TEMP/selftest" --models "$env:CAPTUREAPP_MODELS_DIR" 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/selftest.log"
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # A crash leaves no managed output; the runtime and WER entries name the faulting module and exception.
+            Write-Host "Self-test exited with $code"
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -in '.NET Runtime', 'Application Error', 'Windows Error Reporting' } |
+              ForEach-Object { Write-Host "[$($_.ProviderName)] $($_.Message)" }
+            Get-ChildItem "$env:RUNNER_TEMP/selftest" -Recurse -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== $($_.FullName)"; Get-Content $_.FullName -Tail 40 }
+            exit $code
+          }
           if (-not (Select-String -Path "$env:RUNNER_TEMP/selftest.log" -Pattern "architecture .* \(runtime $rid\)" -Quiet)) { throw "Self-test did not report architecture $rid" }
 
       - name: Gallery
