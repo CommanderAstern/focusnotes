@@ -5,8 +5,10 @@
     <OutputType>WinExe</OutputType>
     <AssemblyName>$(AppName)</AssemblyName>
     <RootNamespace>CaptureApp.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../CaptureApp.AppCore/CaptureApp.AppCore.csproj" />
     <ProjectReference Include="../CaptureApp.Core/CaptureApp.Core.csproj" />
     <ProjectReference Include="../CaptureApp.Platform/CaptureApp.Platform.csproj" />
     <ProjectReference Include="../CaptureApp.Overlay/CaptureApp.Overlay.csproj" />
