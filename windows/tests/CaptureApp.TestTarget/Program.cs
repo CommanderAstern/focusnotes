@@ -100,7 +100,7 @@ internal sealed class TargetForm : Form
                 if (request.Command == "quit") { BeginInvoke(Close); break; }
             }
         }
-        catch (Exception ex) when (ex is IOException or TimeoutException or ObjectDisposedException or InvalidOperationException) { BeginInvoke(Close); }
+        catch (Exception ex) when (ex is IOException or TimeoutException or ObjectDisposedException or InvalidOperationException) { Console.Error.WriteLine(ex); BeginInvoke(Close); }
     }
 
     private Response Command(Request request)

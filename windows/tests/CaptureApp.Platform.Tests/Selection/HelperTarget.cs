@@ -17,15 +17,28 @@ internal sealed class HelperTarget : IAsyncDisposable
 {
     private readonly Process process;
     private readonly NamedPipeServerStream pipe;
-    private readonly StreamReader reader;
-    private readonly StreamWriter writer;
+    private readonly StringBuilder errors = new();
+    private StreamReader reader = null!;
+    private StreamWriter writer = null!;
     internal FrontmostContext Context { get; private set; } = new(0, 0);
 
     private HelperTarget(Process process, NamedPipeServerStream pipe)
     {
         this.process = process; this.pipe = pipe;
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (errors) errors.AppendLine(e.Data); };
+    }
+
+    // Readers/writers wrap the pipe only once connected: an unconnected server stream throws "Pipe hasn't been connected yet".
+    private void Attach()
+    {
         reader = new(pipe, Encoding.UTF8, false, 1024, true);
         writer = new(pipe, new UTF8Encoding(false), 1024, true) { AutoFlush = true };
+    }
+
+    private string Diagnostics()
+    {
+        string stderr; lock (errors) stderr = errors.ToString();
+        return $"helper exited={process.HasExited}" + (process.HasExited ? $" code={process.ExitCode}" : "") + $", stderr: {stderr}";
     }
 
     internal static async Task<HelperTarget> StartAsync()
@@ -53,14 +66,17 @@ internal sealed class HelperTarget : IAsyncDisposable
         Assert.True(executable is not null, "Build the solution so the helper target executable is available.");
         var pipeName = "capture-selection-" + Guid.NewGuid().ToString("N");
         var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-        var start = new ProcessStartInfo(executable!) { UseShellExecute = false };
+        var start = new ProcessStartInfo(executable!) { UseShellExecute = false, RedirectStandardError = true };
         start.ArgumentList.Add(pipeName);
         var process = Process.Start(start)!;
+        process.BeginErrorReadLine();
         var target = new HelperTarget(process, pipe);
         try
         {
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await pipe.WaitForConnectionAsync(deadline.Token);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try { await pipe.WaitForConnectionAsync(deadline.Token); }
+            catch (OperationCanceledException) { throw new InvalidOperationException("Helper never connected to the pipe (" + target.Diagnostics() + ")"); }
+            target.Attach();
             var state = await target.CommandAsync("mode", "normal");
             target.Context = new((nint)state.Window, (uint)process.Id, "Selection fixture");
             return target;
@@ -72,7 +88,7 @@ internal sealed class HelperTarget : IAsyncDisposable
     {
         await writer.WriteLineAsync(JsonSerializer.Serialize(new { Command = command, Value = value }));
         var line = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
-        Assert.NotNull(line);
+        Assert.True(line is not null, "Helper closed the pipe (" + Diagnostics() + ")");
         return JsonSerializer.Deserialize<TargetResponse>(line)!;
     }
 
@@ -101,7 +117,7 @@ internal sealed class HelperTarget : IAsyncDisposable
             }
             catch (TimeoutException) { process.Kill(true); }
         }
-        writer.Dispose(); reader.Dispose(); pipe.Dispose(); process.Dispose();
+        writer?.Dispose(); reader?.Dispose(); pipe.Dispose(); process.Dispose();
     }
 }
 
