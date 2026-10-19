@@ -37,7 +37,7 @@ public sealed class CaptureClassifierTests
     [Fact]
     public void DenseOneLineCropCanBeTextAtTwentyFivePercentCoverage()
     {
-        var line = new OcrLine("heading", 0.1, 0.2, 0.6, 0.7, 0.75f);
+        var line = new OcrLine("heading", 0.25, 0.25, 0.75, 0.75, 0.75f);
 
         var result = CaptureClassifier.Classify([line], 800, 600);
 

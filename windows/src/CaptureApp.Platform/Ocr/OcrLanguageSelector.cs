@@ -5,7 +5,8 @@ using System.Text.Json;
 namespace CaptureApp.Platform.Ocr;
 
 public sealed record OcrRecognizerModel(string Id, string[] Scripts, string[] Languages, string Url,
-    string Revision, string Sha256, long Bytes, string DictUrl, string DictSha256, string License);
+    string Revision, string Sha256, long Bytes, string DictUrl, string DictSha256, string License,
+    string Kind = "recognizer");
 
 public sealed record OcrLanguageSelection(OcrRecognizerModel Model, string PreferredLanguage, string MatchedLanguage,
     bool UsedFallback);

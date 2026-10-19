@@ -10,6 +10,8 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 {
     private static readonly TimeSpan IdleLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan EvictionPeriod = TimeSpan.FromSeconds(10);
+    private const string DetectorFile = "ppocrv5-det-mobile.onnx";
+    private const string ClassifierFile = "ppocrv5-textline-cls-mobile.onnx";
     private static readonly string[] RightToLeftLanguages = ["ar-SA", "ars-SA"];
 
     private readonly object _gate = new();
@@ -17,7 +19,6 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
     private readonly IReadOnlyList<OcrRecognizerModel> _models;
     private readonly OcrLanguageSelection _selection;
     private readonly string _recognizerDirectory;
-    private readonly string _commonModelDirectory;
     private readonly System.Threading.Timer _evictionTimer;
     private bool _disposed;
 
@@ -26,7 +27,6 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         _models = LoadManifest();
         _selection = OcrLanguageSelector.Select(preferredLanguages ?? OcrLanguageSelector.GetPreferredLanguages(), _models);
         _recognizerDirectory = Path.Combine(AppContext.BaseDirectory, "OcrModels");
-        _commonModelDirectory = Path.Combine(AppContext.BaseDirectory, "models", "v5");
         _evictionTimer = new System.Threading.Timer(EvictIdleModels, null, EvictionPeriod, EvictionPeriod);
     }
 
@@ -152,8 +152,8 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
 
     private ModelSlot CreateSlot(OcrRecognizerModel model)
     {
-        var detectorPath = Path.Combine(_commonModelDirectory, "ch_PP-OCRv5_mobile_det.onnx");
-        var classifierPath = Path.Combine(_commonModelDirectory, "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx");
+        var detectorPath = Path.Combine(_recognizerDirectory, DetectorFile);
+        var classifierPath = Path.Combine(_recognizerDirectory, ClassifierFile);
         var recognizerPath = Path.Combine(_recognizerDirectory, $"{model.Id}.onnx");
         var dictionaryPath = Path.Combine(_recognizerDirectory, $"{model.Id}.dict.txt");
         var ocr = new RapidOcr();
@@ -212,8 +212,8 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
         var missing = new List<string>();
         var files = new[]
         {
-            Path.Combine(_commonModelDirectory, "ch_PP-OCRv5_mobile_det.onnx"),
-            Path.Combine(_commonModelDirectory, "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"),
+            Path.Combine(_recognizerDirectory, DetectorFile),
+            Path.Combine(_recognizerDirectory, ClassifierFile),
             Path.Combine(_recognizerDirectory, $"{_selection.Model.Id}.onnx"),
             Path.Combine(_recognizerDirectory, $"{_selection.Model.Id}.dict.txt")
         };
@@ -259,9 +259,11 @@ public sealed class RapidOcrEngine : IOcrEngine, IDisposable
             ?? throw new InvalidOperationException("The embedded OCR model manifest is missing.");
         using var stream = typeof(RapidOcrEngine).Assembly.GetManifestResourceStream(resourceName)
             ?? throw new InvalidOperationException("The embedded OCR model manifest could not be opened.");
-        return JsonSerializer.Deserialize<List<OcrRecognizerModel>>(stream,
-                   new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-               ?? throw new InvalidDataException("The embedded OCR model manifest is empty.");
+        var entries = JsonSerializer.Deserialize<List<OcrRecognizerModel>>(stream,
+                          new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                      ?? throw new InvalidDataException("The embedded OCR model manifest is empty.");
+        // Detector and classifier entries share the manifest but are not language-selectable.
+        return entries.Where(entry => entry.Kind == "recognizer").ToArray();
     }
 
     private sealed class ModelSlot(RapidOcr ocr, long lastUsedTimestamp)

@@ -93,21 +93,24 @@ public sealed class HotkeyBindingStoreTests
 
 public sealed class AltGrGuardTests
 {
+    // The guard checks the chord as configured (Ctrl+Alt+Shift+letter). Polish (Programmers) AltGr+Shift+A types
+    // 'Ą', so that chord is refused. German AltGr+Q types '@' only without Shift, and Shift+AltGr produces no
+    // letter on that layout, so no Ctrl+Alt+Shift+letter chord conflicts there.
     [Theory]
-    [InlineData("00000415")] // Polish (Programmers)
-    [InlineData("00000407")] // German
-    public void LoadedLayoutIsConsideredWhenCheckingAndProposing(string klid)
+    [InlineData("00000415", 'A', true)] // Polish (Programmers)
+    [InlineData("00000407", 'Q', false)] // German
+    public void LoadedLayoutIsConsideredWhenCheckingAndProposing(string klid, char probeLetter, bool probeConflicts)
     {
         var layout = AltGrGuard.LoadLayoutForTesting(klid);
         Assert.SkipUnless(layout != IntPtr.Zero, $"Keyboard layout {klid} is not installed on this Windows runner.");
         try
         {
-            var conflicts = Enumerable.Range('A', 26)
-                .Select(letter => new KeyChord(HotkeyModifiers.Control | HotkeyModifiers.Alt | HotkeyModifiers.Shift, letter))
-                .SelectMany(chord => AltGrGuard.GetConflictingLayouts(chord).Select(conflictingLayout => (chord, conflictingLayout)))
-                .Where(pair => pair.conflictingLayout == layout)
-                .ToArray();
-            Assert.NotEmpty(conflicts);
+            const HotkeyModifiers modifiers = HotkeyModifiers.Control | HotkeyModifiers.Alt | HotkeyModifiers.Shift;
+            var probe = new KeyChord(modifiers, probeLetter);
+            Assert.Equal(probeConflicts, AltGrGuard.GetConflictingLayouts(probe).Contains(layout));
+
+            // Chords that are not Ctrl+Alt+Shift+letter never reach the layout check.
+            Assert.Empty(AltGrGuard.GetConflictingLayouts(new KeyChord(HotkeyModifiers.Control | HotkeyModifiers.Alt, probeLetter)));
 
             var alternative = AltGrGuard.FindNextFreeLetter();
             Assert.NotNull(alternative);

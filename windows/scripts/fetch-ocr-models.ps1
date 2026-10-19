@@ -40,7 +40,9 @@ function Ensure-Asset([string] $Path, [string] $Url, [string] $ExpectedSha, [Nul
 
 foreach ($model in $models) {
     Ensure-Asset (Join-Path $cacheDirectory "$($model.id).onnx") $model.url $model.sha256 ([long]$model.bytes)
-    Ensure-Asset (Join-Path $cacheDirectory "$($model.id).dict.txt") $model.dictUrl $model.dictSha256 $null
+    if ($model.dictUrl) {
+        Ensure-Asset (Join-Path $cacheDirectory "$($model.id).dict.txt") $model.dictUrl $model.dictSha256 $null
+    }
 }
 
 Write-Host "All OCR model assets are present and verified in $cacheDirectory"

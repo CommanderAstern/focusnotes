@@ -20,7 +20,7 @@ public sealed class OcrLanguageSelectorTests
     [Fact]
     public void UnsupportedPreferredLanguageFallsBackToEnglishOnTheChineseRecognizer()
     {
-        using var engine = new RapidOcrEngine(["sv-FI"]);
+        using var engine = new RapidOcrEngine(["he-IL"]);
 
         Assert.True(engine.LanguageSelection.UsedFallback);
         Assert.Equal("en-US", engine.LanguageSelection.MatchedLanguage);

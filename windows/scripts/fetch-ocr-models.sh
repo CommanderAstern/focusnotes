@@ -46,7 +46,9 @@ while IFS=$'\t' read -r model_id model_url model_sha model_bytes dict_url dict_s
   }
 
   ensure_file "$CACHE_DIR/$model_id.onnx" "$model_url" "$model_sha" "$model_bytes"
-  ensure_file "$CACHE_DIR/$model_id.dict.txt" "$dict_url" "$dict_sha"
+  if [[ "$dict_url" != "-" ]]; then
+    ensure_file "$CACHE_DIR/$model_id.dict.txt" "$dict_url" "$dict_sha"
+  fi
 done < <(python3 - "$MANIFEST" <<'PY'
 import json
 import sys
@@ -54,7 +56,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as manifest_file:
     models = json.load(manifest_file)
 for model in models:
-    print("\t".join(str(model[key]) for key in ("id", "url", "sha256", "bytes", "dictUrl", "dictSha256")))
+    print("\t".join(str(model.get(key, "-")) for key in ("id", "url", "sha256", "bytes", "dictUrl", "dictSha256")))
 PY
 )
 
