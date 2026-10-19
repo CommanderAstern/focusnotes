@@ -4,7 +4,7 @@ using CaptureApp.Overlay;
 
 namespace CaptureApp.Gallery;
 
-internal sealed record Fixture(string Name, Func<OverlaySurface> Create, double Width, double Height);
+internal sealed record Fixture(string Name, Func<OverlaySurface> Create, double Width, double Height, Action<OverlaySurface>? Verify = null);
 internal static class Fixtures
 {
     internal static readonly Suggestion[] Suggestions = [
@@ -58,6 +58,76 @@ internal static class Fixtures
         yield return Input("session-picker", "Select a session…", "", Sessions, null, "Multiple sessions found with the given name");
         yield return Input("session-picker-selected", "Select a session…", "", Sessions, 0, "Multiple sessions found with the given name");
         yield return Input("session-picker-empty", "Select a session…", "zzz", [], null, "Multiple sessions found with the given name");
+        foreach (var quick in QuickFixtures()) yield return quick;
+    }
+    internal static readonly BrowseItem[] BrowseItems =
+    [
+        new("a", "Weekly review", "Note · Oct 12", "doc.text", true), new("b", "System Design", "Session · Oct 9", "record.circle", true),
+        new("c", "Rate limiting", "Note · Oct 9", "doc.text", false), new("d", "Caching patterns", "Note · Oct 8", "doc.text", false),
+        new("e", "Message queues", "Note · Oct 8", "doc.text", false), new("f", "MLE Interview Prep", "Session · Oct 7", "record.circle", false),
+        new("g", "Reading list", "Note · Oct 6", "doc.text", false), new("h", "Trip planning", "Note · Oct 5", "doc.text", false),
+        new("i", "Standup notes", "Note · Oct 4", "doc.text", false), new("j", "Ideas", "Note · Oct 3", "doc.text", false)
+    ];
+    internal const string MarkdownSample = "# Heading one\n## Heading two\n### Heading three\n#### Heading four\nPlain with **bold**, *italic*, ~~strike~~ and `code`.\n"
+        + "A [link](https://example.com) and https://example.org\n- bullet item\n1. numbered item\n- [ ] open task\n- [x] done task\n> quoted line\n```\nlet x = 1;\n```\nTyping here";
+    private const string TaskSample = "- [ ] buy milk\n- [x] ship the build\nplain line";
+    private const double GalleryWorkHeight = 900;
+    private static IEnumerable<Fixture> QuickFixtures()
+    {
+        const double bands = Tokens.QuickTopBandHeight + Tokens.QuickFooterHeight;
+        Fixture Quick(string name, string text, Action<QuickNoteView>? configure = null, Action<QuickNoteView>? verify = null, string? destination = null, bool pinned = false, bool restored = false, double work = GalleryWorkHeight)
+        {
+            QuickNoteView Create() { var view = new QuickNoteView(destination, pinned, text, restored) { WorkAreaHeight = work }; configure?.Invoke(view); return view; }
+            var sample = Create(); var fixture = new Fixture(name, Create, sample.Width, sample.Height, surface => verify?.Invoke((QuickNoteView)surface)); sample.Dispose();
+            return fixture;
+        }
+        static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+        yield return Quick("quick-empty", "", verify: v =>
+        {
+            Require(Math.Abs(v.Width - Tokens.QuickMinWidth) < Tokens.LayoutTolerance, "quick-empty: minimum width");
+            Require(Math.Abs(v.Height - Math.Ceiling(bands + v.EditorLineHeight * Tokens.EditorMinLines)) < Tokens.LayoutTolerance, "quick-empty: two-line minimum height");
+        });
+        yield return Quick("quick-empty-hover", "", v => v.SetRevealed(true, false));
+        yield return Quick("quick-hover-pinned", "Trip planning\nBook the train for Friday", v => v.SetRevealed(true, false), destination: "System Design", pinned: true, restored: true);
+        yield return Quick("quick-markdown", MarkdownSample, verify: v =>
+        {
+            Require(v.Editor.RenderedCheckboxes == 2, "quick-markdown: unchecked and checked task boxes render");
+            Require(v.Editor.HiddenCharacters > 0, "quick-markdown: syntax is hidden off the caret line");
+            Require(v.Editor.IsSyntaxRevealed(v.Editor.LineCount), "quick-markdown: caret line shows syntax");
+            Require(v.Height <= Math.Min(GalleryWorkHeight * Tokens.QuickMaxHeightFraction, Tokens.QuickMaxHeight) + Tokens.LayoutTolerance, "quick-markdown: within the height cap");
+        });
+        yield return Quick("quick-caret-line", MarkdownSample, v => v.Editor.CaretOffset = v.Editor.LineStart(5) + 12, v =>
+        {
+            Require(v.Editor.IsSyntaxRevealed(5) && !v.Editor.IsSyntaxRevealed(1), "quick-caret-line: only the caret line shows syntax");
+        });
+        yield return Quick("quick-tasks", TaskSample, verify: v => Require(v.Editor.RenderedCheckboxes == 2, "quick-tasks: both checkboxes render"));
+        yield return Quick("quick-tasks-caret", TaskSample, v => v.Editor.CaretOffset = 3, v =>
+            Require(v.Editor.RenderedCheckboxes == 1 && v.Editor.IsSyntaxRevealed(1), "quick-tasks-caret: the caret line shows its raw task marker"));
+        yield return Quick("quick-wide", new string('w', 160) + " " + new string('w', 40), verify: v =>
+            Require(Math.Abs(v.Width - Tokens.QuickMaxWidth) < Tokens.LayoutTolerance, "quick-wide: width caps at the maximum"));
+        var longText = string.Join("\n", Enumerable.Range(1, 80).Select(i => "Line " + i));
+        yield return Quick("quick-long-540", longText, verify: v =>
+            Require(Math.Abs(v.Height - Math.Ceiling(GalleryWorkHeight * Tokens.QuickMaxHeightFraction)) < Tokens.LayoutTolerance, "quick-long-540: height stops at 60% of the work area"));
+        yield return Quick("quick-long-680", longText, work: 1500, verify: v =>
+            Require(Math.Abs(v.Height - Tokens.QuickMaxHeight) < Tokens.LayoutTolerance, "quick-long-680: height stops at 680"));
+        yield return Quick("quick-actions", "Trip planning\nBook the train", v => { v.SetRevealed(true, false); v.ShowActions(); }, v =>
+        {
+            const double expected = Tokens.CardFieldHeight + Tokens.BorderWidth + Tokens.CardVerticalPadding * 2 + 5 * Tokens.MenuRowHeight + Tokens.MenuGroupMargin * 2 + Tokens.BorderWidth;
+            Require(v.CardSize is { } size && Math.Abs(size.Width - Tokens.MenuWidth) < Tokens.LayoutTolerance && Math.Abs(size.Height - expected) < Tokens.LayoutTolerance, "quick-actions: card size from tokens");
+            Require(v.Height >= Tokens.QuickTopBandHeight + Tokens.CardTopGap + expected + Tokens.CardEdgeMargin - Tokens.LayoutTolerance, "quick-actions: window extends under the card");
+        });
+        yield return Quick("quick-actions-pinned", "Trip planning", v => { v.SetRevealed(true, false); v.ShowActions(); }, pinned: true);
+        yield return Quick("quick-browse", "Trip planning\nBook the train", v => { v.SetRevealed(true, false); v.BrowseItems = () => BrowseItems; v.ShowBrowse(BrowseItems); }, v =>
+        {
+            // Two headers and seven visible rows, pinned section first.
+            const double expected = Tokens.CardFieldHeight + Tokens.BorderWidth + Tokens.CardVerticalPadding * 2 + 2 * Tokens.BrowseHeaderHeight + Tokens.BrowseVisibleRows * Tokens.BrowseRowHeight + Tokens.BorderWidth + Tokens.BrowseFooterHeight;
+            Require(v.CardSize is { } size && Math.Abs(size.Width - Tokens.BrowseCardWidth) < Tokens.LayoutTolerance && Math.Abs(size.Height - expected) < Tokens.LayoutTolerance, "quick-browse: card size from tokens");
+        });
+        yield return Quick("quick-browse-empty", "Trip planning", v => { v.SetRevealed(true, false); v.ShowBrowse([]); }, v =>
+        {
+            const double expected = Tokens.CardFieldHeight + Tokens.BorderWidth + Tokens.BrowseEmptyHeight + Tokens.BorderWidth + Tokens.BrowseFooterHeight;
+            Require(v.CardSize is { } size && Math.Abs(size.Height - expected) < Tokens.LayoutTolerance, "quick-browse-empty: empty card size from tokens");
+        });
     }
     private static Fixture Input(string name, string placeholder, string text, Suggestion[] suggestions, int? selected, string? title = null, string? secondary = null) => new(name,
         () => new InputPanelView(placeholder, text, suggestions, selected, title, secondary), Tokens.InputWidth,

@@ -11,6 +11,9 @@ using CaptureApp.Overlay.Interop;
 
 namespace CaptureApp.Overlay;
 
+/// <summary>A non-TextBox control that takes the keyboard on click, so the first click activates the window.</summary>
+public interface ITypingSurface { IInputElement FocusTarget { get; } }
+
 public enum DismissReason { Explicit, ClickAway, DesktopSwitch, Handoff, OpenExternal, Quit, Expired, Replaced }
 
 /// <summary>UI-only window shell. Geometry always describes the visible surface, excluding shadow.</summary>
@@ -148,8 +151,9 @@ public class OverlayWindow : Window
         {
             NativeMethods.GetCursorPos(out var pointer);
             var hit = InputHitTest(PointFromScreen(new Point(pointer.X, pointer.Y))) as DependencyObject;
-            while (hit is not null && hit is not TextBoxBase) hit = VisualTreeHelper.GetParent(hit);
+            while (hit is not null && hit is not TextBoxBase && hit is not ITypingSurface) hit = VisualTreeHelper.GetParent(hit);
             if (hit is TextBoxBase text) { returnTarget = focus.BeforeActivation(); ActivateForTyping(text); }
+            else if (hit is ITypingSurface surface) { returnTarget = focus.BeforeActivation(); ActivateForTyping(surface.FocusTarget); }
             else { handled = true; return NativeMethods.MaNoActivate; }
         }
         if (message == NativeMethods.WmDpiChanged)

@@ -27,3 +27,22 @@ public sealed record InputRequest(string Placeholder, Func<string, IReadOnlyList
 public enum NoteActionId { NewNote, Browse, Pin, OpenAsNote, CopyMarkdown, DiscardDraft }
 public sealed record BrowseItem(string Id, string Title, string Detail, string SymbolName, bool IsPinned);
 public enum BrowseChoice { Write, Open, Reveal }
+/// <summary>Callbacks for the quick-note panel, mirroring NoteEditorHandlers.</summary>
+public sealed record QuickNoteHandlers(
+    Action<string> OnDraft, Action<string> OnSubmit, Action<string> OnNew, Action<string> OnOpenAsNote,
+    Func<IReadOnlyList<BrowseItem>> BrowseItems, Action<BrowseItem, BrowseChoice> OnBrowse,
+    Func<bool> OnTogglePin, Action OnClose, Action<Exception> OnError,
+    Func<string, string>? TitleForText = null, Action<string>? OnScheduleDraft = null)
+{
+    private static readonly System.Text.RegularExpressions.Regex Marker = new(@"^[ \t]*(?:#+[ \t]+|[-*+][ \t]+(?:\[[ xX]\][ \t]*)?|[0-9]+[.)][ \t]+|>[ \t]*)");
+    /// <summary>First non-blank line with leading Markdown markers removed, cut at 60 characters.</summary>
+    public static string DefaultTitle(string text)
+    {
+        var line = text.Split('\n').Select(l => l.TrimEnd('\r')).FirstOrDefault(l => l.Any(c => !char.IsWhiteSpace(c)));
+        if (line is null) return "";
+        while (Marker.Match(line) is { Success: true, Length: > 0 } match) line = line[match.Length..];
+        line = line.Trim(' ', '\t');
+        return line.Length > Tokens.QuickTitleLimit ? line[..Tokens.QuickTitleLimit].Trim(' ', '\t') + "…" : line;
+    }
+}
+public enum QuickNoteToggle { Presented, Reactivated, Closed }

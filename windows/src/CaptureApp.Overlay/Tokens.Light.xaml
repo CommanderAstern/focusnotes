@@ -24,4 +24,5 @@
   <SolidColorBrush x:Key="Transparent" Color="#00000000" />
   <SolidColorBrush x:Key="Shadow" Color="#FF000000" />
   <SolidColorBrush x:Key="EditorCheckboxCheck" Color="#FFFFFFFF" />
+  <SolidColorBrush x:Key="EditorLink" Color="#FF0067C0" />
 </ResourceDictionary>

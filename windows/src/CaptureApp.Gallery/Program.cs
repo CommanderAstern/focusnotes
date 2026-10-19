@@ -28,7 +28,7 @@ internal static class Program
                     app.Shutdown();
                 }
                 else if (args is ["--live", var component]) Live(component, app);
-                else throw new ArgumentException("Usage: CaptureApp.Gallery --check <outdir> | --live <toast|success|warning|session|copied|search|input|subheading|session-picker>");
+                else throw new ArgumentException("Usage: CaptureApp.Gallery --check <outdir> | --live <toast|success|warning|session|copied|search|input|subheading|session-picker|editor>");
             }
             catch (Exception exception)
             {
@@ -70,6 +70,7 @@ internal static class Program
                         Require(Math.Abs(surface.Width - fixture.Width) < Tokens.LayoutTolerance, fixture.Name + ": visible width");
                         Require(Math.Abs(surface.Height - fixture.Height) < Tokens.LayoutTolerance, fixture.Name + ": visible height");
                         CheckLayout(root, fixture.Name);
+                        fixture.Verify?.Invoke(surface);
                         var name = $"{fixture.Name}-{(dark ? "dark" : "light")}-{scale.ToString("0", CultureInfo.InvariantCulture)}x.png";
                         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(size.Width * scale), (int)Math.Ceiling(size.Height * scale), Tokens.RenderDpi * scale, Tokens.RenderDpi * scale, PixelFormats.Pbgra32);
                         bitmap.Render(root);
@@ -117,6 +118,7 @@ internal static class Program
     {
         if (root is FrameworkElement { Visibility: not Visibility.Visible }) yield break;
         yield return root;
+        if (root is MarkdownEditor) yield break; // The editor control owns its internal layout.
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
             foreach (var child in Descendants(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
@@ -162,6 +164,10 @@ internal static class Program
                     Title: component == "subheading" ? "Add subheading" : null, Secondary: component == "subheading" ? "In System Design" : null)); break;
             case "session-picker":
                 var picker = new SessionPickerController(); liveController = picker; picker.Present(Fixtures.Sessions, _ => Finish(), Finish); break;
+            case "editor":
+                var quick = new QuickNoteController { PositionStore = new MemoryPanelPositionStore() }; liveController = quick;
+                quick.Present(null, false, Fixtures.MarkdownSample, new QuickNoteHandlers(_ => { }, _ => Finish(), _ => Finish(), _ => Finish(), () => Fixtures.BrowseItems, (_, _) => Finish(),
+                    () => true, Finish, exception => Console.Error.WriteLine(exception))); break;
             default: throw new ArgumentException("Unknown component: " + component);
         }
     }
