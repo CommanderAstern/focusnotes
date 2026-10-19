@@ -31,8 +31,9 @@ internal sealed class HelperTarget : IAsyncDisposable
     // Readers/writers wrap the pipe only once connected: an unconnected server stream throws "Pipe hasn't been connected yet".
     private void Attach()
     {
-        reader = new(pipe, Encoding.UTF8, false, 1024, true);
-        writer = new(pipe, new UTF8Encoding(false), 1024, true) { AutoFlush = true };
+        // 64 KB buffers: the 100 MB clipboard dump is a ~133 MB line, which a 1 KB buffer streams painfully slowly.
+        reader = new(pipe, Encoding.UTF8, false, 64 * 1024, true);
+        writer = new(pipe, new UTF8Encoding(false), 64 * 1024, true) { AutoFlush = true };
     }
 
     private string Diagnostics()
@@ -87,7 +88,9 @@ internal sealed class HelperTarget : IAsyncDisposable
     internal async Task<TargetResponse> CommandAsync(string command, string? value = null)
     {
         await writer.WriteLineAsync(JsonSerializer.Serialize(new { Command = command, Value = value }));
-        var line = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        // Placing/dumping the 100 MB payload (base64 over the pipe) legitimately exceeds the usual budget on slow CI.
+        var timeout = TimeSpan.FromSeconds(command is "large" or "dump" ? 90 : 15);
+        var line = await reader.ReadLineAsync().WaitAsync(timeout, TestContext.Current.CancellationToken);
         Assert.True(line is not null, "Helper closed the pipe (" + Diagnostics() + ")");
         return JsonSerializer.Deserialize<TargetResponse>(line)!;
     }

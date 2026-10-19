@@ -85,8 +85,8 @@ internal sealed class TargetForm : Form
         {
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             await pipe.ConnectAsync(10000);
-            using var reader = new StreamReader(pipe, Encoding.UTF8, false, 1024, true);
-            using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, true) { AutoFlush = true };
+            using var reader = new StreamReader(pipe, Encoding.UTF8, false, 64 * 1024, true);
+            using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 64 * 1024, true) { AutoFlush = true };
             while (await reader.ReadLineAsync() is { } line)
             {
                 var request = JsonSerializer.Deserialize<Request>(line)!;
