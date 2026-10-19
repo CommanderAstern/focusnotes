@@ -1,0 +1,54 @@
+name: spikes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ocr:
+    name: OCR spike (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: x64
+            artifact: ocr-results-windows-x64
+          - runner: windows-11-arm
+            architecture: arm64
+            artifact: ocr-results-windows-arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET 10.0.402
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.402'
+          architecture: ${{ matrix.architecture }}
+
+      - name: Run RapidOcrNet corpus
+        run: dotnet run --project windows/spikes/OcrSpike -c Release -- conformance/ocr/corpus conformance/ocr/mac-baseline.json windows/spikes/ocr-results.md
+
+      - name: Upload OCR report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: windows/spikes/ocr-results.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Add OCR report to job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $report = 'windows/spikes/ocr-results.md'
+          if (Test-Path $report) {
+            Get-Content $report | Add-Content $env:GITHUB_STEP_SUMMARY
+          } else {
+            Add-Content $env:GITHUB_STEP_SUMMARY 'The OCR runner did not produce a report.'
+          }
