@@ -5,7 +5,7 @@ using System.Text;
 namespace CaptureApp.Platform.Selection;
 
 internal sealed record ClipboardCopy(string? Text, uint Sequence, bool TargetOwned, bool NotOpened = false);
-internal sealed record ClipboardRestore(bool Restored, TimeSpan HoldTime);
+internal sealed record ClipboardRestore(bool Restored, TimeSpan HoldTime, bool Superseded = false); // Superseded: the sequence moved, so a retry can never succeed.
 
 /// <summary>All mutations are confined to Restore, after a sequence check with the clipboard locked.</summary>
 internal sealed class ClipboardGuard
@@ -127,19 +127,20 @@ internal sealed class ClipboardGuard
             }
             if (!TryOpen(listener.Window)) return new(false, TimeSpan.Zero);
             var hold = Stopwatch.StartNew();
-            bool restored;
-            try { restored = RestoreWhileOpen(prepared, expectedSequence, whileLocked); }
+            bool restored, superseded;
+            try { restored = RestoreWhileOpen(prepared, expectedSequence, whileLocked, out superseded); }
             finally { _ = NativeMethods.CloseClipboard(); }
-            return new(restored, hold.Elapsed);
+            return new(restored, hold.Elapsed, superseded);
 
         }
         finally { foreach (var value in prepared) value.Dispose(); }
     }
 
-    private static bool RestoreWhileOpen(List<ClipboardValue> prepared, uint expectedSequence, Action? whileLocked)
+    private static bool RestoreWhileOpen(List<ClipboardValue> prepared, uint expectedSequence, Action? whileLocked, out bool superseded)
     {
+        superseded = false;
         // G11: checking before OpenClipboard leaves a destructive TOCTOU race. Check ONLY under the lock.
-        if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence) return false;
+        if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence) { superseded = true; return false; }
         whileLocked?.Invoke(); // Deterministic contention seam used only by the helper race test.
         if (!NativeMethods.EmptyClipboard()) return false;
         foreach (var value in prepared)

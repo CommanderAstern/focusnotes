@@ -193,10 +193,10 @@ public sealed class SelectionReader
                 if (restoreSequence is { } expected)
                 {
                     await services.CheckpointAsync(SelectionCheckpoint.BeforeRestore).ConfigureAwait(false);
-                    // A transient lock can fail the restore; retry briefly. A sequence mismatch (newer copy) just fails again, harmlessly.
+                    // Retry only transient failures; a moved sequence (newer copy) is final and must never be retried.
                     for (var attempt = 0; attempt < 3; attempt++)
                     {
-                        if (services.Restore(snapshot, expected).Restored) break;
+                        if (services.Restore(snapshot, expected) is { Restored: true } or { Superseded: true }) break;
                         if (attempt < 2) await Task.Delay(20).ConfigureAwait(false);
                     }
                 }

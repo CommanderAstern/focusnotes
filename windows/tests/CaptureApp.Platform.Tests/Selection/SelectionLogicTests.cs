@@ -135,9 +135,8 @@ public sealed class SelectionLogicTests
     public async Task CouldNotOpenUntilDeadlineStillRestoresLateCopy()
     {
         var fake = new FakeServices();
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        // The target releases the clipboard only after the 500 ms loop deadline: the late check must find and restore it.
-        fake.CopyFactory = () => clock.ElapsedMilliseconds < 520 ? new(null, 0, false, NotOpened: true) : new("late", 11, true);
+        // The target releases the clipboard only for the late check (the sole read that asks for exactly 100 ms).
+        fake.CopyFactory = remaining => remaining == TimeSpan.FromMilliseconds(100) ? new("late", 11, true) : new(null, 0, false, NotOpened: true);
         var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
         Assert.Equal(SelectionFailure.NoSelection, result.Failure);
         Assert.Equal(1, fake.Restores);
@@ -156,7 +155,7 @@ public sealed class SelectionLogicTests
     [Fact]
     public async Task NotOpenedPastDeadlineSchedulesBackgroundRetry()
     {
-        var fake = new FakeServices { CopyFactory = () => new(null, 0, false, NotOpened: true) };
+        var fake = new FakeServices { CopyFactory = _ => new(null, 0, false, NotOpened: true) };
         var result = await new SelectionReader(fake).ReadAsync(true, Target, TestContext.Current.CancellationToken);
         Assert.Equal(SelectionFailure.NoSelection, result.Failure);
         Assert.Equal(1, fake.RetriesScheduled);
@@ -167,7 +166,7 @@ public sealed class SelectionLogicTests
     public async Task NotOpenedWithCancellationBreaksToCleanup()
     {
         using var cancel = new CancellationTokenSource();
-        var fake = new FakeServices { CopyFactory = () => { cancel.Cancel(); return new(null, 0, false, NotOpened: true); } };
+        var fake = new FakeServices { CopyFactory = _ => { cancel.Cancel(); return new(null, 0, false, NotOpened: true); } };
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var result = await new SelectionReader(fake).ReadAsync(true, Target, cancel.Token);
         Assert.Equal(SelectionFailure.Cancelled, result.Failure);
@@ -320,7 +319,7 @@ public sealed class SelectionLogicTests
         internal bool TargetOwnsCopy = true;
         internal SnapshotFailure SnapshotFailure;
         internal Queue<ClipboardCopy> CopyScript = new();
-        internal Func<ClipboardCopy?>? CopyFactory;
+        internal Func<TimeSpan, ClipboardCopy?>? CopyFactory;
         internal int FailRestores, RetriesScheduled;
         internal Action? OnSafetyRead;
         internal Func<SelectionCheckpoint, Task>? Hook;
@@ -340,9 +339,14 @@ public sealed class SelectionLogicTests
             return Task.FromResult(SnapshotFailure == SnapshotFailure.None ? new SnapshotResult(new(ClipboardSequence, []), SnapshotFailure.None) : new(null, SnapshotFailure));
         }
         public bool InjectCopy() { Injections++; ClipboardSequence++; return true; }
-        public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => Task.FromResult<ClipboardCopy?>(CopyFactory is not null ? CopyFactory() : CopyScript.Count > 0 ? CopyScript.Dequeue() : new("copied", ClipboardSequence, TargetOwnsCopy));
+        public Task<ClipboardCopy?> ReadCopyAsync(uint targetPid, TimeSpan remaining, ClipboardSnapshot snapshot) => Task.FromResult<ClipboardCopy?>(CopyFactory is not null ? CopyFactory(remaining) : CopyScript.Count > 0 ? CopyScript.Dequeue() : new("copied", ClipboardSequence, TargetOwnsCopy));
         public ClipboardRestore Restore(ClipboardSnapshot snapshot, uint sequence)
-        { Restores++; Restored = Restores > FailRestores && sequence == ClipboardSequence; return new(Restored, TimeSpan.Zero); }
+        {
+            Restores++;
+            var superseded = sequence != ClipboardSequence; // Distinct from a transient failure (FailRestores).
+            Restored = !superseded && Restores > FailRestores;
+            return new(Restored, TimeSpan.Zero, superseded);
+        }
         public void ScheduleRestoreRetry(uint targetPid, ClipboardSnapshot snapshot) => RetriesScheduled++;
         public Task CheckpointAsync(SelectionCheckpoint checkpoint) => Hook?.Invoke(checkpoint) ?? Task.CompletedTask;
     }
