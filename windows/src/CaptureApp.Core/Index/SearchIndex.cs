@@ -73,9 +73,11 @@ public sealed class SearchIndex : IDisposable
             }
 
             // A note absent from the index is read in full below, so skip the redundant metadata-only open.
+            // Windows compares the listing's snapshot like the Swift index (a changed note is fully re-read and
+            // re-verified below); per-note re-opens are too slow there. POSIX keeps the readability re-check.
             var old = previous.GetValueOrDefault(note.Id);
             VaultFileSnapshot? currentMetadata = note.Snapshot;
-            if (old is not null)
+            if (old is not null && !OperatingSystem.IsWindows())
             {
                 try
                 {
