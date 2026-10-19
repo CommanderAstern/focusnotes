@@ -50,7 +50,7 @@ public sealed class SelectionRaceTests
         await target.FocusAsync();
         var services = new InstrumentedServices { Hook = async point => { if (point.ToString() == checkpoint) await other.FocusAsync(); } };
         var result = await new SelectionReader(services).ReadAsync(true, target.Context, TestContext.Current.CancellationToken);
-        Assert.Equal(SelectionFailure.TargetChanged, result.Failure);
+        Assert.True(result.Failure == SelectionFailure.TargetChanged, $"{result.Failure} at {result.Detail}");
         Assert.Equal(0, services.Injections);
         Assert.Equal(0, (await target.CommandAsync("mode", "normal")).Copies);
     }
@@ -71,7 +71,7 @@ public sealed class SelectionRaceTests
         SelectionResult result;
         try { result = await new SelectionReader(services).ReadAsync(true, target.Context, TestContext.Current.CancellationToken); }
         finally { await target.CommandAsync("release-modifiers"); }
-        Assert.Equal(SelectionFailure.ModifiersHeld, result.Failure);
+        Assert.True(result.Failure == SelectionFailure.ModifiersHeld, $"{result.Failure} at {result.Detail}");
         Assert.Equal("Release the shortcut keys and try again", result.Message);
         Assert.Equal(0, services.Injections);
     }

@@ -88,7 +88,7 @@ public sealed class SelectionLogicTests
     }
 
     [Theory]
-    [InlineData((int)FieldSafety.Unknown, SelectionFailure.SecureField)]
+    [InlineData((int)FieldSafety.Unknown, SelectionFailure.SelectionUndetermined)]
     [InlineData((int)FieldSafety.WrongProcess, SelectionFailure.TargetChanged)]
     public async Task UnknownOrForeignFocusedElementsFailClosed(int fieldValue, SelectionFailure failure)
     {

@@ -18,21 +18,20 @@ public sealed class InstallerTests
     }
 
     /// Serves in-memory files over loopback HTTP with Range support and per-request fault injection.
+    /// A minimal TcpListener server: HttpListener's http.sys handle is disposed under in-flight requests on Windows.
     private sealed class FileServer : IDisposable
     {
-        private readonly HttpListener listener = new();
+        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource stop = new();
+        private readonly List<TcpClient> clients = [];
+        private readonly List<Task> handlers = [];
         private readonly Task loop;
 
         public FileServer(Dictionary<string, byte[]> files)
         {
             Files = files;
-            var probe = new TcpListener(IPAddress.Loopback, 0);
-            probe.Start();
-            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
-            probe.Stop();
-            BaseUrl = $"http://127.0.0.1:{port}";
-            listener.Prefixes.Add(BaseUrl + "/");
             listener.Start();
+            BaseUrl = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
             loop = Task.Run(Serve);
         }
 
@@ -46,74 +45,100 @@ public sealed class InstallerTests
 
         private async Task Serve()
         {
-            while (listener.IsListening)
+            while (!stop.IsCancellationRequested)
             {
-                HttpListenerContext context;
+                TcpClient client;
                 try
                 {
-                    context = await listener.GetContextAsync();
+                    client = await listener.AcceptTcpClientAsync(stop.Token);
                 }
                 catch (Exception)
                 {
                     return;
                 }
 
-                Handle(context);
+                lock (clients)
+                {
+                    clients.Add(client);
+                    handlers.Add(Task.Run(() => Handle(client)));
+                }
             }
         }
 
-        private void Handle(HttpListenerContext context)
+        private async Task Handle(TcpClient client)
         {
-            var path = context.Request.Url!.AbsolutePath.TrimStart('/');
-            var range = context.Request.Headers["Range"];
-            int attempt;
-            lock (Requests)
+            try
             {
-                attempt = Requests.Count(request => request.Path == path);
-                Requests.Add((path, range));
-            }
-
-            var response = context.Response;
-            var fault = Faults(path, attempt);
-            if (fault == Fault.Status500 || fault == Fault.Status404 || !Files.TryGetValue(path, out var body))
-            {
-                response.StatusCode = fault == Fault.Status500 ? 500 : 404;
-                response.Close();
-                return;
-            }
-
-            if (fault == Fault.Corrupt)
-            {
-                body = [.. body];
-                body[0] ^= 0xFF;
-            }
-
-            var start = 0L;
-            if (range is not null && range.StartsWith("bytes=", StringComparison.Ordinal) && long.TryParse(range[6..].TrimEnd('-'), out start))
-            {
-                if (start >= body.Length)
+                using var _ = client;
+                var stream = client.GetStream();
+                using var reader = new StreamReader(stream, System.Text.Encoding.ASCII, false, 4096, leaveOpen: true);
+                var requestLine = await reader.ReadLineAsync(stop.Token);
+                if (requestLine is null)
                 {
-                    response.StatusCode = 416;
-                    response.Close();
                     return;
                 }
 
-                response.StatusCode = 206;
-                response.AddHeader("Content-Range", $"bytes {start}-{body.Length - 1}/{body.Length}");
-            }
+                string? range = null;
+                while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 } header)
+                {
+                    if (header.StartsWith("Range:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        range = header[6..].Trim();
+                    }
+                }
 
-            var slice = body.AsSpan((int)start).ToArray();
-            response.ContentLength64 = slice.Length;
-            if (fault == Fault.TruncateHalf)
+                var path = requestLine.Split(' ')[1].TrimStart('/');
+                int attempt;
+                lock (Requests)
+                {
+                    attempt = Requests.Count(request => request.Path == path);
+                    Requests.Add((path, range));
+                }
+
+                var fault = Faults(path, attempt);
+                if (fault == Fault.Status500 || fault == Fault.Status404 || !Files.TryGetValue(path, out var body))
+                {
+                    await Send(stream, fault == Fault.Status500 ? "500 Internal Server Error" : "404 Not Found", [], []);
+                    return;
+                }
+
+                if (fault == Fault.Corrupt)
+                {
+                    body = [.. body];
+                    body[0] ^= 0xFF;
+                }
+
+                var start = 0L;
+                var status = "200 OK";
+                var headers = new List<string>();
+                if (range is not null && range.StartsWith("bytes=", StringComparison.Ordinal) && long.TryParse(range[6..].TrimEnd('-'), out start))
+                {
+                    if (start >= body.Length)
+                    {
+                        await Send(stream, "416 Range Not Satisfiable", [], []);
+                        return;
+                    }
+
+                    status = "206 Partial Content";
+                    headers.Add($"Content-Range: bytes {start}-{body.Length - 1}/{body.Length}");
+                }
+
+                var slice = body.AsSpan((int)start).ToArray();
+                // Truncation: advertise the full length, send half, then drop the connection.
+                await Send(stream, status, headers, fault == Fault.TruncateHalf ? slice[..(slice.Length / 2)] : slice, slice.Length);
+            }
+            catch (Exception)
             {
-                response.OutputStream.Write(slice, 0, slice.Length / 2);
-                response.OutputStream.Flush();
-                response.Abort();
-                return;
+                // A client that gave up (or shutdown) is not a server failure.
             }
+        }
 
-            response.OutputStream.Write(slice, 0, slice.Length);
-            response.Close();
+        private static async Task Send(NetworkStream stream, string status, IEnumerable<string> headers, byte[] body, int? length = null)
+        {
+            var head = $"HTTP/1.1 {status}\r\nContent-Length: {length ?? body.Length}\r\nConnection: close\r\n{string.Concat(headers.Select(header => header + "\r\n"))}\r\n";
+            await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(head));
+            await stream.WriteAsync(body);
+            await stream.FlushAsync();
         }
 
         public int RequestCount(string path)
@@ -126,8 +151,26 @@ public sealed class InstallerTests
 
         public void Dispose()
         {
-            listener.Close();
-            loop.Wait(TimeSpan.FromSeconds(2));
+            // Stop accepting first, then unblock and drain in-flight handlers before releasing anything.
+            stop.Cancel();
+            listener.Stop();
+            lock (clients)
+            {
+                foreach (var client in clients)
+                {
+                    try { client.Dispose(); } catch (Exception) { }
+                }
+            }
+
+            try { loop.Wait(TimeSpan.FromSeconds(2)); } catch (Exception) { }
+            Task[] pending;
+            lock (clients)
+            {
+                pending = [.. handlers];
+            }
+
+            try { Task.WaitAll(pending, TimeSpan.FromSeconds(2)); } catch (Exception) { }
+            stop.Dispose();
         }
     }
 

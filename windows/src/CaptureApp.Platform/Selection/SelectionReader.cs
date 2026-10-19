@@ -7,10 +7,10 @@ public enum SelectionMethod { UiAutomation, Clipboard }
 public enum SelectionFailure
 {
     NoSelection, OwnApp, Busy, SecureField, TargetChanged, ModifiersHeld, ElevatedTarget,
-    ClipboardUnsafe, ClipboardTooLarge, FallbackOff, Cancelled
+    ClipboardUnsafe, ClipboardTooLarge, FallbackOff, Cancelled, SelectionUndetermined
 }
 public sealed record SelectionCapture(string Text, FrontmostContext Context, SelectionMethod Method);
-public sealed record SelectionResult(SelectionCapture? Capture, SelectionFailure? Failure)
+public sealed record SelectionResult(SelectionCapture? Capture, SelectionFailure? Failure, string? Detail = null)
 {
     public bool IsSuccess => Capture is not null;
     public string? Message => Failure switch
@@ -19,7 +19,7 @@ public sealed record SelectionResult(SelectionCapture? Capture, SelectionFailure
         SelectionFailure.SecureField => PlatformStrings.SecureField,
         SelectionFailure.ModifiersHeld => PlatformStrings.ReleaseShortcutKeys,
         SelectionFailure.ElevatedTarget => PlatformStrings.ElevatedTarget,
-        SelectionFailure.ClipboardUnsafe or SelectionFailure.ClipboardTooLarge => PlatformStrings.CouldNotCapture,
+        SelectionFailure.ClipboardUnsafe or SelectionFailure.ClipboardTooLarge or SelectionFailure.SelectionUndetermined => PlatformStrings.CouldNotCapture,
         null => null,
         _ => PlatformStrings.NoTextSelected
     };
@@ -31,7 +31,8 @@ public sealed record SelectionResult(SelectionCapture? Capture, SelectionFailure
     };
     public string? HintForCaptureArea(string binding) => Failure == SelectionFailure.ElevatedTarget
         ? PlatformStrings.CaptureAreaHint(binding) : Hint;
-    internal static SelectionResult Refuse(SelectionFailure reason) => new(null, reason);
+    // Detail names the check that refused; internal diagnostics only.
+    internal static SelectionResult Refuse(SelectionFailure reason, string? detail = null) => new(null, reason, detail);
 }
 
 internal enum SelectionCheckpoint { AfterUia, AfterModifiers, AfterSnapshot, BeforeInjection, CopyObserved, BeforeRestore }
@@ -100,31 +101,29 @@ public sealed class SelectionReader
             cancellationToken.ThrowIfCancellationRequested();
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4 entry
             if (services.IsElevated(context.ProcessIdentifier)) return SelectionResult.Refuse(SelectionFailure.ElevatedTarget);
-            var entry = await SafetyAsync(context, cancellationToken).ConfigureAwait(false); // G3 entry
-            if (entry is not null) return SelectionResult.Refuse(entry.Value);
+            var entry = await SafetyAsync(context, "G3 entry", cancellationToken).ConfigureAwait(false);
+            if (entry is not null) return entry;
             var selection = await services.ReadUiaAsync(context.ProcessIdentifier, true, cancellationToken).ConfigureAwait(false); // G5
             await services.CheckpointAsync(SelectionCheckpoint.AfterUia).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4 after read
-            var afterRead = await SafetyAsync(context, cancellationToken).ConfigureAwait(false); // G3 after read
-            if (afterRead is not null) return SelectionResult.Refuse(afterRead.Value);
-            if (selection.Safety == FieldSafety.Password) return SelectionResult.Refuse(SelectionFailure.SecureField);
-            if (selection.Safety == FieldSafety.WrongProcess) return SelectionResult.Refuse(SelectionFailure.TargetChanged);
+            var afterRead = await SafetyAsync(context, "G3 after read", cancellationToken).ConfigureAwait(false);
+            if (afterRead is not null) return afterRead;
+            if (selection.Safety == FieldSafety.Password) return SelectionResult.Refuse(SelectionFailure.SecureField, "selection read");
+            if (selection.Safety == FieldSafety.WrongProcess) return SelectionResult.Refuse(SelectionFailure.TargetChanged, "selection read");
             cancellationToken.ThrowIfCancellationRequested();
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged);
             if (!string.IsNullOrEmpty(selection.Text))
                 return new(new(selection.Text, context, SelectionMethod.UiAutomation), null);
             if (!useClipboardFallback) return SelectionResult.Refuse(SelectionFailure.FallbackOff);
 
-            var release = Stopwatch.StartNew();
-            while (services.ModifiersHeld && release.Elapsed < TimeSpan.FromMilliseconds(200)) // G6
-                await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+            await WaitForModifiersAsync(cancellationToken).ConfigureAwait(false); // G6
             cancellationToken.ThrowIfCancellationRequested(); // G12 after modifier wait
-            if (services.ModifiersHeld) return SelectionResult.Refuse(SelectionFailure.ModifiersHeld);
+            if (services.ModifiersHeld) return SelectionResult.Refuse(SelectionFailure.ModifiersHeld, "G6");
             await services.CheckpointAsync(SelectionCheckpoint.AfterModifiers).ConfigureAwait(false);
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4
-            var afterModifiers = await SafetyAsync(context, cancellationToken).ConfigureAwait(false);
-            if (afterModifiers is not null) return SelectionResult.Refuse(afterModifiers.Value);
+            var afterModifiers = await SafetyAsync(context, "G3 after modifiers", cancellationToken).ConfigureAwait(false);
+            if (afterModifiers is not null) return afterModifiers;
             var signal = services.ClipboardSignal; // Listener must be installed before snapshot/injection.
             using var snapshotResult = await services.SnapshotAsync(cancellationToken).ConfigureAwait(false); // G10
             cancellationToken.ThrowIfCancellationRequested();
@@ -133,8 +132,8 @@ public sealed class SelectionReader
                     ? SelectionFailure.ClipboardTooLarge : SelectionFailure.ClipboardUnsafe);
             await services.CheckpointAsync(SelectionCheckpoint.AfterSnapshot).ConfigureAwait(false);
             if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged); // G4 before G3: a focus switch is not a secure field
-            var beforePost = await SafetyAsync(context, cancellationToken).ConfigureAwait(false); // G3 before post
-            if (beforePost is not null) return SelectionResult.Refuse(beforePost.Value);
+            var beforePost = await SafetyAsync(context, "G3 before post", cancellationToken).ConfigureAwait(false);
+            if (beforePost is not null) return beforePost;
             if (services.IsElevated(context.ProcessIdentifier)) return SelectionResult.Refuse(SelectionFailure.ElevatedTarget);
             await services.CheckpointAsync(SelectionCheckpoint.BeforeInjection).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
@@ -190,15 +189,29 @@ public sealed class SelectionReader
         finally { Volatile.Write(ref captureInProgress, 0); }
     }
 
-    private async Task<SelectionFailure?> SafetyAsync(FrontmostContext context, CancellationToken token)
+    private async Task WaitForModifiersAsync(CancellationToken token)
+    {
+        var release = Stopwatch.StartNew();
+        while (services.ModifiersHeld && release.Elapsed < TimeSpan.FromMilliseconds(200))
+            await Task.Delay(10, token).ConfigureAwait(false);
+    }
+
+    private async Task<SelectionResult?> SafetyAsync(FrontmostContext context, string check, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var field = await services.ReadUiaAsync(context.ProcessIdentifier, false, token).ConfigureAwait(false);
-        return field.Safety switch
+        switch (field.Safety)
         {
-            FieldSafety.Safe => null,
-            FieldSafety.WrongProcess => SelectionFailure.TargetChanged,
-            _ => SelectionFailure.SecureField // Unknown must never allow injection into a possible password field.
-        };
+            case FieldSafety.Safe: return null;
+            case FieldSafety.Password: return SelectionResult.Refuse(SelectionFailure.SecureField, check);
+            case FieldSafety.WrongProcess: return SelectionResult.Refuse(SelectionFailure.TargetChanged, check);
+        }
+        // Undetermined (timeout/exception/no focused element): never inject, but name the real cause.
+        // A focus switch mid-read or a held modifier (a Win key opens Start and steals UIA focus) explains it.
+        if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged, check + " (undetermined, foreground changed)");
+        await WaitForModifiersAsync(token).ConfigureAwait(false);
+        if (services.ModifiersHeld) return SelectionResult.Refuse(SelectionFailure.ModifiersHeld, check + " (undetermined, modifiers held)");
+        if (!services.IsFrontmost(context)) return SelectionResult.Refuse(SelectionFailure.TargetChanged, check + " (undetermined, foreground changed)");
+        return SelectionResult.Refuse(SelectionFailure.SelectionUndetermined, check);
     }
 }
