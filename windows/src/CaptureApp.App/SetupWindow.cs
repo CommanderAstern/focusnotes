@@ -145,15 +145,11 @@ internal sealed class SetupWindow : Window
         }
     }
 
-    private void Mark(SetupStepId id, SetupStatus value, string? detail = null)
-    {
-        State.Mark(id, value, detail);
-        controller.OnSetupChanged();
-    }
+    private bool Mark(SetupStepId id, SetupStatus value, string? detail = null) => controller.MarkSetup(id, value, detail);
 
     private void Finish(SetupStepId id, SetupStatus value, string? detail = null)
     {
-        Mark(id, value, detail);
+        if (!Mark(id, value, detail)) { return; }
         if (current + 1 < steps.Count && value != SetupStatus.Failed) { Go(current + 1); } else { Go(current); }
     }
 
@@ -198,9 +194,18 @@ internal sealed class SetupWindow : Window
                 return;
             }
 
-            controller.ApplyClipboardFallback(use.IsChecked == true);
-            controller.ApplyUpdatesChoice(auto.IsChecked == true ? UpdatesChoice.Auto : UpdatesChoice.Manual);
-            Mark(SetupStepId.Disclosure, SetupStatus.Passed);
+            var previousFallback = controller.Settings.ClipboardFallback;
+            var previousChoice = controller.Settings.UpdatesChoice;
+            if (!controller.ApplyClipboardFallback(use.IsChecked == true)) { return; }
+            if (!controller.ApplyUpdatesChoice(auto.IsChecked == true ? UpdatesChoice.Auto : UpdatesChoice.Manual)
+                || !Mark(SetupStepId.Disclosure, SetupStatus.Passed))
+            {
+                // Step 0 stays unanswered, so neither choice may look saved.
+                controller.TrySave(() => controller.Settings.ClipboardFallback = previousFallback);
+                controller.TrySave(() => controller.Settings.UpdatesChoice = previousChoice);
+                return;
+            }
+
             controller.OnConsentAnswered();
             Go(current + 1);
         }, true)));
@@ -230,7 +235,7 @@ internal sealed class SetupWindow : Window
             }
 
             var changed = !string.Equals(Path.GetFullPath(folder), Path.GetFullPath(controller.CurrentNotesFolder), StringComparison.OrdinalIgnoreCase);
-            controller.Settings.NotesFolder = folder;
+            if (!controller.SaveNotesFolder(folder)) { result.Text = Strings.CouldNotSaveSettings; return; }
             Mark(SetupStepId.NotesFolder, SetupStatus.Passed, changed ? "Applied on restart" : null);
             result.SetResourceReference(TextBlock.ForegroundProperty, "Secondary");
             result.Text = string.Join("\n", notes.Prepend(changed ? "The folder is writable. It takes effect after you restart the app." : "The folder is writable."));
@@ -344,7 +349,12 @@ internal sealed class SetupWindow : Window
         {
             try
             {
-                controller.ApplyStartAtLogin(toggle.IsChecked == true);
+                if (!controller.ApplyStartAtLogin(toggle.IsChecked == true))
+                {
+                    toggle.IsChecked = controller.Settings.StartAtLogin ?? true;
+                    return;
+                }
+
                 Finish(SetupStepId.StartAtLogin, SetupStatus.Passed, toggle.IsChecked == true ? null : "Off by choice");
             }
             catch (Exception error) when (error is InvalidOperationException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException)
@@ -365,7 +375,13 @@ internal sealed class SetupWindow : Window
         body.Children.Add(manual);
         body.Children.Add(UiKit.Row(UiKit.Button("Looks good", () =>
         {
-            controller.ApplyUpdatesChoice(auto.IsChecked == true ? UpdatesChoice.Auto : UpdatesChoice.Manual);
+            if (!controller.ApplyUpdatesChoice(auto.IsChecked == true ? UpdatesChoice.Auto : UpdatesChoice.Manual))
+            {
+                auto.IsChecked = controller.Settings.UpdatesChoice != UpdatesChoice.Manual;
+                manual.IsChecked = controller.Settings.UpdatesChoice == UpdatesChoice.Manual;
+                return;
+            }
+
             Finish(SetupStepId.Updates, SetupStatus.Passed);
         }, true), SkipButton(SetupStepId.Updates)));
     }

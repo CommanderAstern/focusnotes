@@ -143,7 +143,15 @@ internal sealed partial class AppController : IDisposable
             Settings.UpdatesChoice is not null);
         FolderWritable = folder.Ok;
         if (!Setup.ConsentAnswered) { return; }
-        var regressed = Setup.Revalidate(report);
+        IReadOnlyList<SetupStepId> regressed;
+        try { regressed = Setup.Revalidate(report); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // Automatic: the next launch re-checks.
+            log.Error($"Setup re-validation could not be saved: {error.Message}");
+            return;
+        }
+
         if (regressed.Count > 0)
         {
             Coordinator.ShowToast(new(AppToastStyle.Warning, Strings.SetupNeedsAttentionTitle, Strings.OpenTraySetup));

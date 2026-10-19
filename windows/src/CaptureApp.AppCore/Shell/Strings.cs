@@ -35,6 +35,8 @@ public static class Strings
     public const string CouldNotEndSession = "Couldn't end session";
     public const string CouldNotResumeSession = "Couldn't resume session";
     public const string CouldNotCopyCapture = "Couldn't copy capture";
+    public const string CouldNotSaveSettings = "Couldn't save settings";
+    public const string CouldNotSaveSettingsHint = "Close other apps using settings.json and try again.";
     public const string CouldNotOpenFolder = "Couldn't open the notes folder";
     public const string NothingToOpen = "Nothing to open yet";
     public const string WriteSomethingFirst = "Write something first";

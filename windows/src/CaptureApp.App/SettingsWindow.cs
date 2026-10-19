@@ -47,7 +47,11 @@ internal sealed class SettingsWindow : Window
         var loginMessage = UiKit.Text("", 12, false, "Warning");
         login.Click += (_, _) =>
         {
-            try { controller.ApplyStartAtLogin(login.IsChecked == true); loginMessage.Text = ""; }
+            try
+            {
+                loginMessage.Text = "";
+                if (!controller.ApplyStartAtLogin(login.IsChecked == true)) { login.IsChecked = controller.LoginItem.IsEnabled; }
+            }
             catch (Exception error) when (error is InvalidOperationException or UnauthorizedAccessException or System.Security.SecurityException)
             {
                 loginMessage.Text = $"Couldn't update start at login: {error.Message}";
@@ -59,7 +63,10 @@ internal sealed class SettingsWindow : Window
         panel.Children.Add(UiKit.Rule());
 
         var fallback = UiKit.Check("Use the clipboard fallback for Capture Selection", controller.Settings.ClipboardFallback == true);
-        fallback.Click += (_, _) => controller.ApplyClipboardFallback(fallback.IsChecked == true);
+        fallback.Click += (_, _) =>
+        {
+            if (!controller.ApplyClipboardFallback(fallback.IsChecked == true)) { fallback.IsChecked = controller.Settings.ClipboardFallback == true; }
+        };
         panel.Children.Add(fallback);
         panel.Children.Add(UiKit.Secondary("When an app doesn't share its selection, the fallback briefly sends Ctrl+C to it and then restores your clipboard. The app's own copy may appear in Windows clipboard history."));
         panel.Children.Add(UiKit.Rule());
@@ -72,7 +79,7 @@ internal sealed class SettingsWindow : Window
             var value = folder.Text.Trim();
             var probe = AppController.ProbeNotesFolder(value);
             if (!probe.Ok) { folderMessage.Text = $"Can't write to that folder: {probe.Cause}"; return; }
-            controller.Settings.NotesFolder = value;
+            if (!controller.SaveNotesFolder(value)) { folderMessage.Text = Strings.CouldNotSaveSettings; return; }
             folderMessage.Text = "Saved. The new folder is used after you restart the app.";
         }
 
@@ -94,8 +101,16 @@ internal sealed class SettingsWindow : Window
         var auto = UiKit.Radio("Check for updates automatically (daily)", "settingsUpdates", controller.Settings.UpdatesChoice != UpdatesChoice.Manual);
         var manual = UiKit.Radio("Only when I ask", "settingsUpdates", controller.Settings.UpdatesChoice == UpdatesChoice.Manual);
         var message = UiKit.Secondary(controller.Settings.UpdatesChoice is null ? "Choose an option in Setup to confirm it." : "Automatic checks take effect on the next launch.");
-        auto.Click += (_, _) => controller.ApplyUpdatesChoice(UpdatesChoice.Auto);
-        manual.Click += (_, _) => controller.ApplyUpdatesChoice(UpdatesChoice.Manual);
+        void Choose(UpdatesChoice choice)
+        {
+            if (controller.ApplyUpdatesChoice(choice)) { return; }
+            // Show the value that is actually saved.
+            auto.IsChecked = controller.Settings.UpdatesChoice != UpdatesChoice.Manual;
+            manual.IsChecked = controller.Settings.UpdatesChoice == UpdatesChoice.Manual;
+        }
+
+        auto.Click += (_, _) => Choose(UpdatesChoice.Auto);
+        manual.Click += (_, _) => Choose(UpdatesChoice.Manual);
         panel.Children.Add(auto);
         panel.Children.Add(manual);
         panel.Children.Add(message);

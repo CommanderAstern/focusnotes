@@ -2,6 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using CaptureApp.AppCore.Shell;
 using CaptureApp.Platform.Hotkeys;
 
 namespace CaptureApp.App;
@@ -86,7 +87,7 @@ internal sealed class ShortcutsPanel : StackPanel
     {
         var set = controller.Settings.DisabledShortcuts.ToHashSet(StringComparer.Ordinal);
         if (wasDisabled) { set.Remove(action.ToString()); } else { set.Add(action.ToString()); }
-        controller.Settings.DisabledShortcuts = set;
+        if (!controller.TrySave(() => controller.Settings.DisabledShortcuts = set)) { Refresh(); return; }
         controller.RegisterHotkeys();
         message.Text = "";
         Refresh();
@@ -102,7 +103,11 @@ internal sealed class ShortcutsPanel : StackPanel
             controller.RegisterHotkeys();
             message.Text = "Shortcuts reset to the defaults.";
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { message.Text = $"Couldn't save: {error.Message}"; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            controller.ReportSaveFailure(error);
+            message.Text = Strings.CouldNotSaveSettings;
+        }
         Refresh();
         changed();
     }

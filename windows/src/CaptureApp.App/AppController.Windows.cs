@@ -33,7 +33,13 @@ internal sealed partial class AppController
         Setup.Reload();
         var window = new SetupWindow(this, manual);
         setupWindow = window;
-        window.Closed += (_, _) => { setupWindow = null; Setup.AcknowledgeVersion(); RefreshMenu(); };
+        window.Closed += (_, _) =>
+        {
+            setupWindow = null;
+            try { Setup.AcknowledgeVersion(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { log.Error($"Setup version could not be saved: {error.Message}"); }
+            RefreshMenu();
+        };
         window.Show();
         window.Activate();
     }
@@ -115,7 +121,7 @@ internal sealed partial class AppController
             if (result.Succeeded)
             {
                 var set = Settings.DisabledShortcuts.ToHashSet(StringComparer.Ordinal);
-                if (set.Remove(action.ToString())) { Settings.DisabledShortcuts = set; }
+                if (set.Remove(action.ToString())) { TrySave(() => Settings.DisabledShortcuts = set); }
                 LoadBindings();
             }
 
@@ -123,23 +129,57 @@ internal sealed partial class AppController
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
+            if (exception is not InvalidDataException) { ReportSaveFailure(exception); }
             return new(action, chord, false, 0, exception.Message);
         }
     }
 
-    internal void ApplyStartAtLogin(bool enabled)
+    /// Runs a user-triggered settings save. A locked or unwritable settings.json is logged and shown as a toast;
+    /// false means nothing was saved, so the caller must keep showing the previous value.
+    internal bool TrySave(Action save)
     {
+        try { save(); return true; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            ReportSaveFailure(error);
+            return false;
+        }
+    }
+
+    internal void ReportSaveFailure(Exception error)
+    {
+        log.Error($"Settings could not be saved ({error.GetType().Name}): {error.Message}");
+        Coordinator?.ShowToast(new(AppToastStyle.Warning, Strings.CouldNotSaveSettings, Strings.CouldNotSaveSettingsHint));
+    }
+
+    internal bool MarkSetup(SetupStepId id, SetupStatus status, string? detail = null)
+    {
+        var saved = TrySave(() => Setup.Mark(id, status, detail));
+        if (saved) { RefreshMenu(); }
+        return saved;
+    }
+
+    internal bool ApplyStartAtLogin(bool enabled)
+    {
+        var previous = LoginItem.IsEnabled;
         LoginItem.SetEnabled(enabled);
-        Settings.StartAtLogin = enabled;
+        if (TrySave(() => Settings.StartAtLogin = enabled)) { return true; }
+        // Keep the Run key in step with the saved choice.
+        try { LoginItem.SetEnabled(previous); }
+        catch (Exception error) when (error is InvalidOperationException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        return false;
     }
 
-    internal void ApplyUpdatesChoice(UpdatesChoice choice)
+    internal bool ApplyUpdatesChoice(UpdatesChoice choice)
     {
-        Settings.UpdatesChoice = choice;
+        if (!TrySave(() => Settings.UpdatesChoice = choice)) { return false; }
         RefreshMenu();
+        return true;
     }
 
-    internal void ApplyClipboardFallback(bool enabled) => Settings.ClipboardFallback = enabled;
+    internal bool ApplyClipboardFallback(bool enabled) => TrySave(() => Settings.ClipboardFallback = enabled);
+
+    internal bool SaveNotesFolder(string folder) => TrySave(() => Settings.NotesFolder = folder);
 
     internal string CurrentNotesFolder => Settings.NotesFolder ?? Path.Combine(Platform.Shell.KnownFolders.Documents, AppInfo.Name);
 
