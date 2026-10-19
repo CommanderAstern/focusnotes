@@ -94,9 +94,15 @@ internal sealed class HelperTarget : IAsyncDisposable
 
     internal async Task FocusAsync(string field = "first")
     {
-        _ = NativeMethods.AllowSetForegroundWindow((uint)process.Id);
-        var result = await CommandAsync("focus", field);
-        Assert.True(result.Foreground, "SetForegroundWindow probe succeeded, but the helper could not become foreground.");
+        // Foreground changes can lose a race with the previous window's teardown; retry briefly.
+        var foreground = false;
+        for (var attempt = 0; attempt < 5 && !foreground; attempt++)
+        {
+            _ = NativeMethods.AllowSetForegroundWindow((uint)process.Id);
+            foreground = (await CommandAsync("focus", field)).Foreground;
+            if (!foreground) await Task.Delay(100, TestContext.Current.CancellationToken);
+        }
+        Assert.True(foreground, "SetForegroundWindow probe succeeded, but the helper could not become foreground.");
         await Task.Delay(30, TestContext.Current.CancellationToken);
     }
 

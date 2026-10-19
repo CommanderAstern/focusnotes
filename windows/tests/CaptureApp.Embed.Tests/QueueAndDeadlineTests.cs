@@ -36,14 +36,53 @@ public sealed class QueueAndDeadlineTests
     [Fact]
     public async Task DeadlineIsNotDelayedByUncancellableWork()
     {
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        var result = await SemanticDeadline.RunAsync(TimeSpan.FromMilliseconds(100), -1, _ =>
+        // Manual clock: the deadline is fired by hand while the operation is parked in an uncancellable
+        // synchronous wait, so there is no wall-clock race with the runner's speed or thread-pool load.
+        var clock = new ManualTimeProvider();
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var running = SemanticDeadline.RunAsync(TimeSpan.FromMilliseconds(100), -1, _ =>
         {
-            Thread.Sleep(1500);
+            started.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
             return Task.FromResult(1);
-        });
-        Assert.Equal(-1, result);
-        Assert.True(watch.Elapsed < TimeSpan.FromMilliseconds(1000), $"took {watch.Elapsed}");
+        }, timeProvider: clock);
+        try
+        {
+            Assert.True(started.Wait(TimeSpan.FromSeconds(30)));
+            clock.FireTimers();
+            Assert.Equal(-1, await running.WaitAsync(TimeSpan.FromSeconds(30)));
+            Assert.False(release.IsSet);
+        }
+        finally { release.Set(); }
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private readonly List<ManualTimer> timers = [];
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(callback, state);
+            lock (timers) timers.Add(timer);
+            return timer;
+        }
+
+        public void FireTimers()
+        {
+            ManualTimer[] snapshot;
+            lock (timers) snapshot = [.. timers];
+            foreach (var timer in snapshot) timer.Fire();
+        }
+
+        private sealed class ManualTimer(TimerCallback callback, object? state) : ITimer
+        {
+            private volatile bool disposed;
+            public void Fire() { if (!disposed) callback(state); }
+            public bool Change(TimeSpan dueTime, TimeSpan period) => !disposed;
+            public void Dispose() => disposed = true;
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
     }
 
     [Fact]

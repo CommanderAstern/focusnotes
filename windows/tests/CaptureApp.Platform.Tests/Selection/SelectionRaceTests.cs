@@ -45,6 +45,8 @@ public sealed class SelectionRaceTests
         await using var desktop = await DesktopProbe.RequireAsync();
         await using var target = await HelperTarget.StartAsync();
         await using var other = await HelperTarget.StartAsync();
+        // Start from a known, live-owned plain clipboard (earlier tests leave arbitrary owners/formats behind).
+        await target.CommandAsync("seed");
         await target.FocusAsync();
         var services = new InstrumentedServices { Hook = async point => { if (point.ToString() == checkpoint) await other.FocusAsync(); } };
         var result = await new SelectionReader(services).ReadAsync(true, target.Context, TestContext.Current.CancellationToken);
