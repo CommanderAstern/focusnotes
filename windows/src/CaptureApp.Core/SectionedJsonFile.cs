@@ -20,7 +20,7 @@ public static class SectionedJsonFile
     public static JsonNode? ReadSection(string path, string section)
     {
         var full = Path.GetFullPath(path);
-        lock (GateFor(full)) { return ReadRoot(full)[section]?.DeepClone(); }
+        lock (GateFor(full)) { return ReadRoot(full, strict: false)[section]?.DeepClone(); }
     }
 
     public static T? ReadSection<T>(string path, string section, JsonSerializerOptions? options = null)
@@ -35,7 +35,7 @@ public static class SectionedJsonFile
         var full = Path.GetFullPath(path);
         lock (GateFor(full))
         {
-            var root = ReadRoot(full);
+            var root = ReadRoot(full, strict: true); // Throws when unreadable: never overwrite what was not read.
             var next = change(root[section]?.DeepClone());
             root.Remove(section);
             if (next is not null) { root[section] = next; }
@@ -55,24 +55,32 @@ public static class SectionedJsonFile
         var full = Path.GetFullPath(path);
         lock (GateFor(full))
         {
-            _ = ReadRoot(full);
+            _ = ReadRoot(full, strict: false);
             return File.Exists(full);
         }
     }
 
     private static object GateFor(string fullPath) => Gates.GetOrAdd(fullPath, _ => new object());
 
-    private static JsonObject ReadRoot(string fullPath)
+    /// An empty root only when the file is absent or was quarantined as corrupt. A file that stays
+    /// unreadable after a few retries yields an empty root for readers and throws for writers.
+    private static JsonObject ReadRoot(string fullPath, bool strict)
     {
         string text;
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            if (!File.Exists(fullPath)) { return []; }
-            text = File.ReadAllText(fullPath, Encoding.UTF8);
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            return [];
+            try
+            {
+                if (!File.Exists(fullPath)) { return []; }
+                text = File.ReadAllText(fullPath, Encoding.UTF8);
+                break;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                if (attempt < 4) { Thread.Sleep(20); continue; }
+                if (strict) { throw; }
+                return [];
+            }
         }
 
         try

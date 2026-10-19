@@ -45,7 +45,7 @@ public static class NoteFile
         {
             current = Path.Combine(current, parts[i]);
             var metadata = FileMetadata.At(current);
-            if (metadata?.IsLink == true || (File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            if (metadata?.IsLink == true || metadata is null && (File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
             {
                 throw new VaultFileException(VaultFileError.PermissionDenied, "Managed paths cannot contain links.");
             }
@@ -91,7 +91,34 @@ public static class NoteFile
         value.Validate(directory: true);
     }
 
-    public static void PrepareRoot(string root) => ValidateDirectory(root, true);
+    public static void PrepareRoot(string root)
+    {
+        ValidateDirectory(root, true);
+        SweepStaleTemporaries(root);
+    }
+
+    private static readonly ConcurrentDictionary<string, bool> SweptRoots = new(StringComparer.Ordinal);
+    private static readonly System.Text.RegularExpressions.Regex PendingName = new(@"^\.pending-[0-9a-f]{32}$");
+
+    // Best effort, once per root per process: remove ".pending-<guid>" files that a crashed write left behind.
+    internal static void SweepStaleTemporaries(string root, TimeSpan? olderThan = null)
+    {
+        if (olderThan is null && !SweptRoots.TryAdd(root, true)) { return; }
+        var cutoff = DateTime.UtcNow - (olderThan ?? TimeSpan.FromHours(1));
+        try
+        {
+            var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Offline };
+            foreach (var path in Directory.EnumerateFiles(root, ".pending-*", options))
+            {
+                try
+                {
+                    if (PendingName.IsMatch(Path.GetFileName(path)) && File.GetLastWriteTimeUtc(path) < cutoff) { File.Delete(path); }
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+    }
     public static void PrepareManagedDirectory(string root, string relativePath)
     {
         var path = SafePath(root, relativePath + "/.directory-check", true);

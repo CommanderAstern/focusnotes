@@ -9,7 +9,7 @@ internal sealed record WatchSnapshot(FileAttributes Attributes, long Size, long 
 {
     private const FileAttributes Recall = (FileAttributes)(0x400000 | 0x40000);
     internal bool IsDirectory => (Attributes & FileAttributes.Directory) != 0;
-    internal bool IsLink => (Attributes & FileAttributes.ReparsePoint) != 0 && !IsPlaceholder;
+    internal bool IsLink => (Attributes & FileAttributes.ReparsePoint) != 0 && !IsPlaceholder && Metadata is { IsLink: true };
     internal bool IsPlaceholder => IsOnlineOnly(Attributes);
     internal static bool IsOnlineOnly(FileAttributes attributes) => (attributes & (FileAttributes.Offline | Recall)) != 0;
 

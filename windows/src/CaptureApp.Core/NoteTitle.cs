@@ -35,7 +35,7 @@ public sealed record VaultNamingRules
         }
 
         var device = component.Split('.')[0].TrimEnd(' ');
-        if (Regex.IsMatch(device, @"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) || component.Any(c => char.IsControl(c) || "<>:\"|?*".Contains(c)) || component.EndsWith(' ') || component.EndsWith('.'))
+        if (Regex.IsMatch(device, @"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) || component.Any(c => char.IsControl(c) || "<>:\"|?*".Contains(c)) || component.EndsWith(' ') || component.EndsWith('.'))
         {
             throw new NotePathNameException(NotePathNameError.InvalidComponent);
         }

@@ -44,11 +44,8 @@ public sealed class VaultMonitor : IDisposable
 
     public void Start()
     {
-        lock (gate)
-        {
-            ObjectDisposedException.ThrowIf(stopped, this);
-            watcher.Start();
-        }
+        lock (gate) { ObjectDisposedException.ThrowIf(stopped, this); }
+        watcher.Start(); // Outside the gate: watcher deliveries take the gate on their own thread.
     }
 
     public Task SyncAsync() => QueueRefresh(notes: true, assets: false, fullAssetValidation: false, []);
@@ -56,10 +53,8 @@ public sealed class VaultMonitor : IDisposable
 
     public void RefreshExternalRoots()
     {
-        lock (gate)
-        {
-            if (!stopped) { watcher.RefreshExternalRoots(); }
-        }
+        lock (gate) { if (stopped) { return; } }
+        watcher.RefreshExternalRoots();
     }
 
     public async Task StopAsync()

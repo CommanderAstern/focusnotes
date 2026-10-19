@@ -64,7 +64,7 @@ public sealed class VaultWatcher : IDisposable
     private ulong? registryGeneration;
     private string? registryParent;
     private bool registryPending, rootRescanPending, rootFallback, running, disposed;
-    private int epoch, streamGeneration, maximumParents = 64;
+    private int epoch, streamGeneration, maximumParents = 64, deliveringEpoch = -1;
     private TimeSpan fallbackInterval = TimeSpan.FromSeconds(15);
     private long lastRetry;
     private Func<string, bool>? failWatchForChecks;
@@ -303,7 +303,10 @@ public sealed class VaultWatcher : IDisposable
                     result.TryAdd(pair.Key, pair.Value);
                 }
                 ReportIssue("scan:" + directory);
+                return;
             }
+
+            issues.Remove("scan:" + directory);
         }
 
         try
@@ -657,7 +660,29 @@ public sealed class VaultWatcher : IDisposable
             {
                 if (generation != epoch) { return; }
                 deliveryTimer?.Dispose(); deliveryTimer = null;
-                while (generation == epoch && deliveries.TryDequeue(out var next)) { onChange(next); }
+                if (deliveringEpoch == generation) { return; } // The active loop drains the queue.
+                deliveringEpoch = generation;
+            }
+
+            // Deliver outside the lock so observers can call back into the watcher.
+            try
+            {
+                while (true)
+                {
+                    VaultChange next;
+                    lock (gate)
+                    {
+                        // Release ownership in the same lock as the empty check, or a concurrent Publish is stranded.
+                        if (generation != epoch || !deliveries.TryDequeue(out next!)) { deliveringEpoch = -1; return; }
+                    }
+
+                    onChange(next);
+                }
+            }
+            catch
+            {
+                lock (gate) { deliveringEpoch = -1; }
+                throw;
             }
         }, null, TimeSpan.Zero, Timeout.InfiniteTimeSpan);
     }

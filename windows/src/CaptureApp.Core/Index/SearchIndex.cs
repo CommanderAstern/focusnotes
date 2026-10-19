@@ -113,6 +113,7 @@ public sealed class SearchIndex : IDisposable
 
             if (snapshot?.Contents is not { } contents)
             {
+                previous.Remove(note.Id); // A failed read keeps the stale row instead of deleting it.
                 continue;
             }
 
@@ -416,9 +417,12 @@ public sealed class SearchIndex : IDisposable
         return row.Step() ? checked((int)row.Int(0)) : 0;
     }
 
+    // Like Swift's String(decoding:as:): invalid bytes become U+FFFD instead of failing the sync.
+    private static readonly System.Text.Encoding LenientUtf8 = new System.Text.UTF8Encoding(false, false);
+
     private void Index(byte[] contents, string path, NoteKind kind, string titleFallback, Fingerprint fingerprint)
     {
-        var parsed = NoteParser.Parse(NoteFile.Utf8.GetString(contents), path, titleFallback, timeZone, vault.AssetsUrl);
+        var parsed = NoteParser.Parse(LenientUtf8.GetString(contents), path, titleFallback, timeZone, vault.AssetsUrl);
         database.Transaction(() =>
         {
             database.Execute("""
