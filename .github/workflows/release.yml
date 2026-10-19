@@ -515,6 +515,12 @@ jobs:
         with:
           subject-path: dist/*.dmg
 
+      - name: Attest Windows assets
+        if: needs.windows-gate.outputs.enabled == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*-win-*
+
       - name: Push release tag
         env:
           VERSION: ${{ steps.version.outputs.version }}

@@ -69,6 +69,38 @@ MIT license. The pinned model card also refers deployers to the
   `THIRD_PARTY_NOTICES.md`, `Apache-2.0.txt`, and `EmbeddingGemma2-NOTICE.txt`
   in `Contents/Resources`.
 
+## Windows edition components
+
+The Windows edition (in development, not yet released) is built from the NuGet packages below at the versions pinned
+in `windows/Directory.Packages.props` and the committed `packages.lock.json` files; licenses were read from each
+package's metadata (`.nuspec`). Each package keeps its own license, and the shipped installer includes the upstream
+license files the packages carry. The app is published self-contained, so the .NET runtime and Windows Presentation
+Foundation libraries (MIT, Microsoft Corporation) are bundled with it.
+
+| Component | Version | License | Used for |
+| --- | --- | --- | --- |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`Microsoft.ML.OnnxRuntime`, `.Managed`), win-x64 and win-arm64 | 1.31.0 | MIT | Runs the OCR and embedding models. Same upstream release as the macOS runtime above, bundled in the installer instead of downloaded. |
+| [RapidOcrNet](https://github.com/BobLd/RapidOcrNet) | 4.2.0 | Apache-2.0 | .NET wrapper around the PaddleOCR detection, classification and recognition pipeline. |
+| [Clipper2](https://github.com/AngusJohnson/Clipper2) (`Clipper2`, a RapidOcrNet dependency) | 2.0.0 | Boost Software License 1.0 | Polygon geometry for OCR text boxes. |
+| [PaddleOCR PP-OCRv5](https://github.com/PaddlePaddle/PaddleOCR) models, ONNX conversions published by [RapidAI/RapidOCR](https://www.modelscope.cn/models/RapidAI/RapidOCR) | release `v3.10.0` | Apache-2.0 | Text detection, orientation classification and recognition. Each model and dictionary is pinned by URL, byte size and SHA-256 in `windows/src/CaptureApp.Platform/Ocr/ocr-models.json`; the build fetches and verifies them, and they ship inside the installer. |
+| [SQLitePCLRaw](https://github.com/ericsink/SQLitePCL.raw) (`bundle_e_sqlite3`, `core`, `provider.e_sqlite3`, `config.e_sqlite3`) | 3.0.5 | Apache-2.0 | .NET bindings and the bundled native build of SQLite with FTS5. |
+| [SQLite](https://www.sqlite.org/copyright.html) (native library from the `SQLite` package) | 3.53.4 | Public domain | The search index and vector store. |
+| [Microsoft.Data.Sqlite](https://github.com/dotnet/efcore) (`Microsoft.Data.Sqlite`, `.Core`) | 10.0.13 | MIT | ADO.NET access to SQLite. |
+| [Velopack](https://github.com/velopack/velopack) (library and the `vpk` packaging tool) | 1.2.161 | MIT | Per-user installer, delta updates and update application. |
+| [AvalonEdit](https://github.com/icsharpcode/AvalonEdit) | 6.3.1.120 | MIT | The quick-note text editor control. |
+| [SkiaSharp](https://github.com/mono/SkiaSharp) (with `SkiaSharp.NativeAssets.Win32`) | 3.119.1 | MIT; the bundled native Skia library keeps its upstream license | Image decoding and resizing for embeddings. |
+| [BouncyCastle.Cryptography](https://github.com/bcgit/bc-csharp) | 2.6.2 | MIT (per package metadata) | Ed25519 verification of the signed update index. |
+| [System.Numerics.Tensors](https://github.com/dotnet/runtime) (a RapidOcrNet dependency) | 9.0.0 | MIT | Tensor math. |
+
+The EmbeddingGemma 2 model files are the same pinned Hugging Face revision described above; the Windows opt-in downloads
+only those files, because ONNX Runtime ships with the app. The Windows build also carries Unicode case-folding data in
+`windows/src/CaptureApp.Core/UnicodeCaseFolding.cs`, covered by the Unicode License v3 in
+[`windows/src/CaptureApp.Core/UnicodeCaseFolding.LICENSE.txt`](windows/src/CaptureApp.Core/UnicodeCaseFolding.LICENSE.txt),
+which is copied next to the build output.
+
+Test-only packages are not distributed: xUnit (`xunit.v3.mtp-off` 4.0.2, `xunit.runner.visualstudio` 4.0.1, Apache-2.0)
+and `Microsoft.NET.Test.Sdk` 18.11.0 (MIT).
+
 ## Project icon assets
 
 The maintainer confirms that the source app-icon artwork in `assets/` was

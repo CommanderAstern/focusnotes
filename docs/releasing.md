@@ -185,6 +185,79 @@ Publish the draft in the GitHub UI or with `gh release edit v<version> --draft=f
 Only then does `releases/latest/download/appcast.xml` point to this release, so
 existing users are offered the update.
 
+## Windows release prerequisites
+
+The Windows edition is in development and has never been released. The Mac release above is unchanged and does not
+wait on any of this. Windows files are attached to a release only when every item below exists; until then the
+`windows-gate` job in `release.yml` reports that Windows assets are skipped, and the Mac release proceeds as before.
+Unsigned Windows builds exist only as short-lived CI workflow artifacts and are never attached to a release or served
+by the updater.
+
+Setting up these prerequisites is a maintainer task; agents never handle the secrets.
+
+| Item | Kind | Purpose |
+| --- | --- | --- |
+| `SIGNPATH_API_TOKEN` | Secret | Lets the signing step reach SignPath. Exported to the Pack step as an environment variable. |
+| `WINDOWS_SIGN_TEMPLATE` | Secret | The `vpk --signTemplate` command line that signs `Setup.exe` and the app binaries. It must read the token from the environment (for example `%SIGNPATH_API_TOKEN%`), never inline. |
+| `WINDOWS_UPDATE_ED_KEY_1` | Secret | Private half of update key K1, used by the Mac release job to sign each `releases.win-*.json`. |
+| `WINDOWS_SIGNER_THUMBPRINTS` | Repository variable | Comma-separated thumbprints of the certificates that may sign our own binaries; the signing inventory fails on any other signer. |
+| `WINDOWS_UPDATE_ED_KEYS` | `Config/app.env` | Public keys the app trusts, as `<keyId>:<base64>` entries. Committed. |
+
+The gate enables Windows assets only when `SIGNPATH_API_TOKEN` and `WINDOWS_SIGN_TEMPLATE` are both set. If they are
+set but `WINDOWS_UPDATE_ED_KEYS` is empty or `WINDOWS_UPDATE_ED_KEY_1` is missing, the release run fails rather than
+shipping Windows files that cannot be updated.
+
+### Windows update keys (K1 and K2)
+
+The Windows update index is signed with Ed25519 keys that are separate from the Sparkle key, so a Mac key compromise
+cannot extend to Windows. Every signed Windows build trusts two keys from the start: an online key (K1) and an offline
+standby (K2).
+
+```sh
+scripts/make-windows-update-key.sh 1   # K1: online signing key
+scripts/make-windows-update-key.sh 2   # K2: offline rotation key
+```
+
+Each run generates a key, writes the private half to a mode-0600 backup file `~/<app name>-windows-update-key-K<n>.txt`
+(never printed), and appends the public half to `WINDOWS_UPDATE_ED_KEYS` in `Config/app.env`. Run it on the
+maintainer's machine, never in CI. Then:
+
+1. Store the K1 backup as the `WINDOWS_UPDATE_ED_KEY_1` secret.
+2. Back K2 up separately and keep it out of CI until it is needed.
+3. Delete both backup files after they are in the password manager, and commit `Config/app.env`.
+
+The signature covers the exact index bytes and the channel, and installed copies refuse an index signed by an unknown
+or dropped key, so never remove a key from `Config/app.env` without a release that trusts its replacement.
+
+- **Planned rotation.** Sign with K2, ship a release that trusts K2 and a new K3, and later drop K1.
+- **K1 compromise.** Ship an emergency release signed with K2 that drops K1 and adds a new standby. Installed copies
+  already trust K2 and move over automatically.
+- **Both keys lost.** Delete the affected index from the release assets so installed copies fail closed ("Update check
+  failed") and never trust a new key, say so in the release notes, and have users reinstall from the new signed
+  `Setup.exe`. Their notes and app state are kept.
+
+Authenticode certificate renewals do not affect updates, because the app trusts the index key, not a certificate.
+
+### What a Windows release contains
+
+For each of `win-x64` and `win-arm64`, the Windows matrix packs `<app name>-win-<arch>-Setup.exe`, the full and delta
+`.nupkg` files, `releases.win-<arch>.json` and `assets.win-<arch>.json`. The Mac `release` job downloads them, rejects
+duplicate asset names across architectures, signs each `releases.win-*.json` (writing the `.sig` beside it), adds all
+Windows files to `SHA256SUMS.txt`, attests the DMG and every `*-win-*` asset, and uploads everything to the same draft release.
+
+### Signing inventory
+
+Before upload, `windows/scripts/signing-inventory.ps1 -Enforce` installs each architecture's `Setup.exe`, then lists
+every `.exe` and `.dll` in the installed layout and in every shipped installer artifact and writes
+`signing-inventory-<arch>.json` (path, SHA-256, signer, chain). Every file must be one of:
+
+1. **Ours**, signed by a certificate whose thumbprint is in `WINDOWS_SIGNER_THUMBPRINTS`.
+2. **Vendor-signed** with a Trusted Root chain.
+3. **An unmodified upstream binary** whose hash is on `windows/scripts/upstream-allowlist.json`.
+
+Anything else fails the release. When a dependency update changes an allow-listed binary, review it and update the
+allow-list in the same PR. The report-only mode (no `-Enforce`) runs in `checks.yml` on every PR.
+
 ## Rollback
 
 Sparkle never downgrades. To roll back a bad release, publish a new release
@@ -219,8 +292,11 @@ Secrets used by `release.yml`:
 | `SIGNING_P12_PASSWORD` | Password for the `.p12` |
 | `SIGNING_KEYCHAIN_PASSWORD` | Password for the CI keychain |
 | `SPARKLE_ED_PRIVATE_KEY` | Sparkle EdDSA private key for `appcast.xml` |
+| `SIGNPATH_API_TOKEN`, `WINDOWS_SIGN_TEMPLATE`, `WINDOWS_UPDATE_ED_KEY_1` | Windows signing and update-index signing; see [Windows release prerequisites](#windows-release-prerequisites). Optional: without the first two, Windows assets are skipped. |
 
 The maintainer still smoke-tests the draft and publishes it manually.
+
+The repository variable `WINDOWS_SIGNER_THUMBPRINTS` is also read by the Windows signing inventory.
 
 ### `release.sh` environment variables
 
