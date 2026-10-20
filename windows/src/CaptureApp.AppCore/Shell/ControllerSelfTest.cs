@@ -273,18 +273,29 @@ public static class ControllerSelfTest
         var pipeline = CapturePipeline.Open(vault, state, zone, null, 0.12, homeDirectory: home);
         var coordinator = new CaptureCoordinator(pipeline, new HeadlessCaptureHost());
         var release = new ManualResetEventSlim();
+        var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acquisitionFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<bool>? terminate = null;
         var png = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 5, 5, 5 };
         var id = Guid.NewGuid();
         try
         {
             coordinator.BeginAcquisition(async () =>
             {
-                coordinator.RecordAcquiredImage(PendingCaptures.Image(png, null, new CaptureSource("Demo"), "Image", id));
-                await Task.Run(() => release.Wait(TimeSpan.FromSeconds(30))).ConfigureAwait(false);
-                return null;
+                try
+                {
+                    coordinator.RecordAcquiredImage(PendingCaptures.Image(png, null, new CaptureSource("Demo"), "Image", id));
+                    acquired.SetResult();
+                    await Task.Run(() => release.Wait(TimeSpan.FromSeconds(30))).ConfigureAwait(false);
+                    return null;
+                }
+                finally { acquisitionFinished.TrySetResult(); }
             });
-            await Task.Delay(100).ConfigureAwait(false);
-            var terminate = coordinator.BeginTermination(TimeSpan.FromMilliseconds(500));
+            if (!await ShutdownWait.WaitAsync(acquired.Task, TimeSpan.FromSeconds(10)).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException("The in-flight acquisition did not record its image before termination.");
+            }
+            terminate = coordinator.BeginTermination(TimeSpan.FromMilliseconds(500));
             await terminate.ConfigureAwait(false);
             if (pipeline.Journal.RecordPaths().Count != 1 && pipeline.Index.Capture(id) is null)
             {
@@ -294,7 +305,12 @@ public static class ControllerSelfTest
         finally
         {
             release.Set();
-            pipeline.Dispose();
+            try
+            {
+                if (terminate is not null) { await terminate.ConfigureAwait(false); }
+                if (acquired.Task.IsCompleted) { await acquisitionFinished.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+            }
+            finally { pipeline.Dispose(); }
         }
 
         pipeline = CapturePipeline.Open(vault, state, zone, null, 0.12, homeDirectory: home);

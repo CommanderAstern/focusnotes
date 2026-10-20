@@ -664,6 +664,10 @@ public sealed class CaptureCoordinator
         var task = Task.Run(async () =>
         {
             var completed = await ShutdownWait.WaitAsync(drain, deadline).ConfigureAwait(false);
+            Task[] persistences;
+            lock (gate) { persistences = recoveryPersistences.Values.ToArray(); }
+            try { await ShutdownWait.WaitAsync(Task.WhenAll(persistences), TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            catch (Exception error) { log.Error($"Shutdown recovery journal failed: {error.GetType().Name}"); }
             lock (gate)
             {
                 shutdownFinished = true;
